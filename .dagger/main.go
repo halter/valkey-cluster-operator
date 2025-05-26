@@ -312,7 +312,7 @@ func (m *ValkeyClusterOperator) BuildAndLoadLocally(
 		tag := strings.ReplaceAll(string(platform), "/", "-")
 		image := strings.TrimSpace(strings.SplitN(out, ":", 2)[1])
 		_, err = dockerCli.
-			WithExec([]string{"docker", "tag", image, "valkey:" + tag}).
+			WithExec([]string{"docker", "tag", image, "valkey-server:" + tag}).
 			Sync(ctx)
 		if err != nil {
 			return err
