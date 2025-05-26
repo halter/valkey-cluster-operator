@@ -354,6 +354,7 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 		WithEnvVariable("CACHEBUSTER", time.Now().String()).
 		WithExec([]string{"kind", "create", "cluster"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:linux-amd64"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-server:linux-amd64"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithDirectory("/src", source).
 		WithWorkdir("/src")
 
