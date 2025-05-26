@@ -1,0 +1,23 @@
+name: dagger
+
+permissions: write-all
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Call Dagger Function
+        uses: dagger/dagger-for-github@8.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: "latest"
+          module: ./
+          args: create-git-hub-release --gh-token=env://GITHUB_TOKEN

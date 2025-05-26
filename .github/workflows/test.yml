@@ -1,0 +1,35 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  unit_test:
+    name: unit-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Call Dagger Function
+        uses: dagger/dagger-for-github@8.0.0
+        with:
+          version: "latest"
+          module: ./
+          args: unit-test
+          cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
+  e2e_test:
+    name: e2e-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Call Dagger Function
+        uses: dagger/dagger-for-github@8.0.0
+        with:
+          version: "latest"
+          module: ./
+          args: e-2-e-test --sock=/var/run/docker.sock
