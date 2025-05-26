@@ -120,7 +120,7 @@ func (m *ValkeyClusterOperator) PublishValkeyDocker(
 	ghToken *dagger.Secret,
 ) error {
 	// container registry for the multi-platform image
-	imageRepo := "ghcr.io/" + GITHUB_ORG + "/valkey:8.0.2"
+	imageRepo := "ghcr.io/" + GITHUB_ORG + "/valkey-server:8.0.2"
 
 	platformVariants, err := m.BuildValkeyContainerImage(ctx)
 	if err != nil {

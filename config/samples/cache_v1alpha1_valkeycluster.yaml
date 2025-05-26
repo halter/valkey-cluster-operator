@@ -1,0 +1,32 @@
+apiVersion: cache.halter.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: valkey-cluster-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: valkeycluster-sample
+spec:
+  image: ghcr.io/halter/valkey-server:8.0.2
+  nodeSelector:
+    halter/nodegroupname: valkey
+  shards: 1
+  replicas: 1
+  resources:
+    limits:
+      cpu: "0.8"
+      memory: 714Mi
+    requests:
+      cpu: "0.4"
+      memory: 714Mi
+  storage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: 2Gi
+    storageClassName: gp3
+  tolerations:
+  - effect: NoSchedule
+    key: dedicated
+    operator: Equal
+    value: valkeyGroup

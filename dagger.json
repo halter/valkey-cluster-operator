@@ -1,0 +1,8 @@
+{
+  "name": "valkey-cluster-operator",
+  "engineVersion": "v0.18.8",
+  "sdk": {
+    "source": "go"
+  },
+  "source": ".dagger"
+}
