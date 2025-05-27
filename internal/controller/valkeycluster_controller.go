@@ -1156,23 +1156,26 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
 	ls["statefulset.kubernetes.io/sts-name"] = name
 
-	affinityTerms := []corev1.PodAffinityTerm{}
+	affinityTerms := []corev1.WeightedPodAffinityTerm{}
 	for _, topologyKey := range valkeyCluster.Spec.AntiAffinityTopologyKeys {
-		affinityTerms = append(affinityTerms, corev1.PodAffinityTerm{
-			LabelSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"statefulset.kubernetes.io/sts-name": name,
-					"cache/name":                         valkeyCluster.Name,
+		affinityTerms = append(affinityTerms, corev1.WeightedPodAffinityTerm{
+			Weight: 1,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"statefulset.kubernetes.io/sts-name": name,
+						"cache/name":                         valkeyCluster.Name,
+					},
 				},
+				TopologyKey: topologyKey,
 			},
-			TopologyKey: topologyKey,
 		})
 	}
 	var affinity *corev1.Affinity
 	if len(affinityTerms) > 0 {
 		affinity = &corev1.Affinity{
 			PodAntiAffinity: &corev1.PodAntiAffinity{
-				RequiredDuringSchedulingIgnoredDuringExecution: affinityTerms,
+				PreferredDuringSchedulingIgnoredDuringExecution: affinityTerms,
 			},
 		}
 	}
