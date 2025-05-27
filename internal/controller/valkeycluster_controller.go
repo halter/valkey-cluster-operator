@@ -1194,6 +1194,10 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: ls,
+					Annotations: map[string]string{
+						"prometheus.io/port": "9121",
+						"prometheus.io/path": "/metrics",
+					},
 				},
 				Spec: corev1.PodSpec{
 					NodeSelector: valkeyCluster.Spec.NodeSelector,
