@@ -495,7 +495,7 @@ func (m *ValkeyClusterOperator) GetNextReleaseVersion(
 		}
 	}
 
-	return "", fmt.Errorf("Could not get next release version")
+	return "v0.0.1", nil
 
 }
 
