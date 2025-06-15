@@ -20,7 +20,7 @@ What is **NOT** implemented:
 
 In order to develop on `valkey-cluster-operator`, you'll want to install the following tools:
 
-- [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), used to spinning up a local Kubernetes cluster to install the operator into, as well as execute e2e tests against
+- [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), used for spinning up a local Kubernetes cluster. This is use to install the operator, as well as to execute e2e tests against the running operator (and the resources it manages)
 - [Dagger](https://docs.dagger.io/install), a task runner that handles most of what `Makefile` offers, with enhanced caching and use of containers for reproducibility.
 
 ## Getting Started
