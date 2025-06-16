@@ -372,8 +372,8 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 		WithExec([]string{"go", "install", "sigs.k8s.io/kind@v0.29.0"}).
 		WithEnvVariable("CACHEBUSTER", time.Now().String()).
 		WithExec([]string{"kind", "create", "cluster"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
-		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:latest"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
-		WithExec([]string{"kind", "load", "docker-image", "valkey-server:latest"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-server:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithDirectory("/src", source).
 		WithWorkdir("/src")
 
