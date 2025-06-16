@@ -252,73 +252,92 @@ func (m *ValkeyClusterOperator) BuildAndLoadLocally(
 	source *dagger.Directory,
 	sock *dagger.Socket,
 ) error {
+	hostPlatform, err := m.detectHostPlatform(ctx)
+	if err != nil {
+		return err
+	}
+
 	platformVariants, err := m.Build(ctx, source)
 	if err != nil {
 		return err
 	}
 
-	for _, ctr := range platformVariants {
-		dockerCli := dag.Container().
-			From("docker:cli").
-			WithUnixSocket("/var/run/docker.sock", sock).
-			WithMountedFile("image.tar", ctr.AsTarball())
-
-		// Load the image from the tarball
-		out, err := dockerCli.
-			WithExec([]string{"docker", "load", "-i", "image.tar"}).
-			Stdout(ctx)
-		if err != nil {
-			return err
-		}
-
-		// Add the tag to the image
-		platform, err := ctr.Platform(ctx)
-		if err != nil {
-			return err
-		}
-		tag := strings.ReplaceAll(string(platform), "/", "-")
-		image := strings.TrimSpace(strings.SplitN(out, ":", 2)[1])
-		_, err = dockerCli.
-			WithExec([]string{"docker", "tag", image, "valkey-cluster-operator:" + tag}).
-			Sync(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	platformVariants, err = m.BuildValkeyContainerImage(ctx)
+	// Kind does not support multi-architecture images so we only load the image architecture that matches the host machine.
+	err = m.loadSingleArchImage(ctx, platformVariants, hostPlatform, "valkey-cluster-operator:latest", sock)
 	if err != nil {
 		return err
 	}
 
+	valkeyVariants, err := m.BuildValkeyContainerImage(ctx)
+	if err != nil {
+		return err
+	}
+
+	return m.loadSingleArchImage(ctx, valkeyVariants, hostPlatform, "valkey-server:latest", sock)
+}
+
+func (m *ValkeyClusterOperator) detectHostPlatform(ctx context.Context) (string, error) {
+	output, err := dag.Container().
+		From("alpine").
+		WithExec([]string{"uname", "-m"}).
+		Stdout(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	arch := strings.TrimSpace(output)
+	switch arch {
+	case "x86_64":
+		return "linux/amd64", nil
+	case "aarch64", "arm64":
+		return "linux/arm64", nil
+	default:
+		return "linux/amd64", nil
+	}
+}
+
+func (m *ValkeyClusterOperator) loadSingleArchImage(
+	ctx context.Context,
+	platformVariants []*dagger.Container,
+	targetPlatform string,
+	imageName string,
+	sock *dagger.Socket,
+) error {
+	// Find matching container
+	var targetContainer *dagger.Container
 	for _, ctr := range platformVariants {
-		dockerCli := dag.Container().
-			From("docker:cli").
-			WithUnixSocket("/var/run/docker.sock", sock).
-			WithMountedFile("image.tar", ctr.AsTarball())
-
-		// Load the image from the tarball
-		out, err := dockerCli.
-			WithExec([]string{"docker", "load", "-i", "image.tar"}).
-			Stdout(ctx)
-		if err != nil {
-			return err
-		}
-
-		// Add the tag to the image
 		platform, err := ctr.Platform(ctx)
 		if err != nil {
-			return err
+			continue
 		}
-		tag := strings.ReplaceAll(string(platform), "/", "-")
-		image := strings.TrimSpace(strings.SplitN(out, ":", 2)[1])
-		_, err = dockerCli.
-			WithExec([]string{"docker", "tag", image, "valkey-server:" + tag}).
-			Sync(ctx)
-		if err != nil {
-			return err
+		if string(platform) == targetPlatform {
+			targetContainer = ctr
+			break
 		}
 	}
-	return nil
+
+	if targetContainer == nil {
+		return fmt.Errorf("no container found for platform %s", targetPlatform)
+	}
+
+	dockerCli := dag.Container().
+		From("docker:cli").
+		WithUnixSocket("/var/run/docker.sock", sock).
+		WithMountedFile("image.tar", targetContainer.AsTarball())
+
+	out, err := dockerCli.
+		WithExec([]string{"docker", "load", "-i", "image.tar"}).
+		Stdout(ctx)
+	if err != nil {
+		return err
+	}
+
+	loadedImage := strings.TrimSpace(strings.SplitN(out, ":", 2)[1])
+	_, err = dockerCli.
+		WithExec([]string{"docker", "tag", loadedImage, imageName}).
+		Sync(ctx)
+
+	return err
 }
 
 func (m *ValkeyClusterOperator) BuildTestEnv(
@@ -353,8 +372,8 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 		WithExec([]string{"go", "install", "sigs.k8s.io/kind@v0.29.0"}).
 		WithEnvVariable("CACHEBUSTER", time.Now().String()).
 		WithExec([]string{"kind", "create", "cluster"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
-		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:linux-amd64"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
-		WithExec([]string{"kind", "load", "docker-image", "valkey-server:linux-amd64"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:latest"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-server:latest"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithDirectory("/src", source).
 		WithWorkdir("/src")
 

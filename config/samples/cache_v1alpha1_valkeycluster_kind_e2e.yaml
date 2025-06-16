@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: valkeycluster-sample
 spec:
-  image: valkey-server:linux-amd64
+  image: valkey-server:latest
   shards: 1
   replicas: 1
   resources:
