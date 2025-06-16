@@ -109,11 +109,19 @@ var _ = Describe("controller", Ordered, func() {
 				status, err := utils.Run(cmd)
 				ExpectWithOffset(2, err).NotTo(HaveOccurred())
 				if string(status) != "Running" {
+					cmd = exec.Command("kubectl", "describe",
+						"pods", controllerPodName,
+						"-n", namespace,
+					)
+					output, err := utils.Run(cmd)
+					if err != nil {
+						fmt.Printf("pod description: %s\n", string(output))
+					}
 					return fmt.Errorf("controller pod in %s status", status)
 				}
 				return nil
 			}
-			EventuallyWithOffset(1, verifyControllerUp, time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyControllerUp, time.Minute, 2*time.Second).Should(Succeed())
 
 			By("creating an instance of the ValkeyCluster Operand(CR)")
 			EventuallyWithOffset(1, func() error {
