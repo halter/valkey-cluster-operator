@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -67,7 +66,7 @@ var _ = Describe("controller", Ordered, func() {
 			projectDir, _ := utils.GetProjectDir()
 
 			// projectimage stores the name of the image used in the example
-			var projectimage = fmt.Sprintf("valkey-cluster-operator:%s-%s", runtime.GOOS, runtime.GOARCH)
+			projectimage := "valkey-cluster-operator:latest"
 
 			By("installing CRDs")
 			cmd := exec.Command("make", "install")
