@@ -113,7 +113,7 @@ var _ = Describe("controller", Ordered, func() {
 				}
 				return nil
 			}
-			EventuallyWithOffset(1, verifyControllerUp, time.Minute, 2*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyControllerUp, time.Minute, 15*time.Second).Should(Succeed())
 
 			By("creating an instance of the ValkeyCluster Operand(CR)")
 			EventuallyWithOffset(1, func() error {
