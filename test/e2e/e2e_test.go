@@ -114,7 +114,7 @@ var _ = Describe("controller", Ordered, func() {
 						"-n", namespace,
 					)
 					output, err := utils.Run(cmd)
-					if err != nil {
+					if err == nil {
 						fmt.Printf("pod description: %s\n", string(output))
 					}
 					return fmt.Errorf("controller pod in %s status", status)
