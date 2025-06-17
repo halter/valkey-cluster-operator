@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -67,7 +66,7 @@ var _ = Describe("controller", Ordered, func() {
 			projectDir, _ := utils.GetProjectDir()
 
 			// projectimage stores the name of the image used in the example
-			var projectimage = fmt.Sprintf("valkey-cluster-operator:%s-%s", runtime.GOOS, runtime.GOARCH)
+			projectimage := "valkey-cluster-operator:latest"
 
 			By("installing CRDs")
 			cmd := exec.Command("make", "install")
@@ -109,6 +108,14 @@ var _ = Describe("controller", Ordered, func() {
 				status, err := utils.Run(cmd)
 				ExpectWithOffset(2, err).NotTo(HaveOccurred())
 				if string(status) != "Running" {
+					cmd = exec.Command("kubectl", "describe",
+						"pods", controllerPodName,
+						"-n", namespace,
+					)
+					output, err := utils.Run(cmd)
+					if err == nil {
+						fmt.Printf("pod description: %s\n", string(output))
+					}
 					return fmt.Errorf("controller pod in %s status", status)
 				}
 				return nil
