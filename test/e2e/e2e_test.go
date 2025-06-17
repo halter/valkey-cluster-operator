@@ -300,6 +300,32 @@ var _ = Describe("controller", Ordered, func() {
 			}
 			EventuallyWithOffset(1, verifyPodResources, 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
+		It("change minReadySeconds", func() {
+			cmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				`-p=[{"op":"replace","path":"/spec/minReadySeconds","value":15}]`,
+			)
+			_, err := utils.Run(cmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+			verifyClusterMinReadySeconds := func() error {
+				cmd = exec.Command("kubectl",
+					"-n", namespace,
+					"get", "valkeycluster",
+					"valkeycluster-sample", "-o", "jsonpath={.spec.minReadySeconds}",
+				)
+				minReadySeconds, err := utils.Run(cmd)
+				fmt.Println(string(minReadySeconds))
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				if string(minReadySeconds) != "15" {
+					return fmt.Errorf("minReadySeconds expected to be set to 15 but got %s", minReadySeconds)
+				}
+				return nil
+			}
+			Eventually(verifyClusterMinReadySeconds, time.Minute, time.Second).Should(Succeed())
+		})
 		It("change storage", func() {
 			Skip("local storage provisioner cannot resize storage")
 			cmd := exec.Command("kubectl",

@@ -1191,6 +1191,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
+			MinReadySeconds: 10,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: ls,
