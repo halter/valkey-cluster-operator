@@ -11,6 +11,7 @@ spec:
     halter/nodegroupname: valkey
   shards: 1
   replicas: 1
+  minReadySeconds: 10
   resources:
     limits:
       cpu: "0.8"

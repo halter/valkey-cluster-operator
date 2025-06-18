@@ -55,6 +55,16 @@ type ValkeyClusterSpec struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Storage *corev1.PersistentVolumeClaimSpec `json:"storage,omitempty"`
 
+	// An optional field that specifies the minimum number of seconds for which a
+	// newly created Pod should be ready without any of its containers crashing, for
+	// it to be considered available.
+	// This defaults to 0 (the Pod will be considered available as soon as it is ready).
+	//
+	// NOTE: If support for `progressDeadlineSeconds` is added in future, it must be
+	// greater than `minReadySeconds` if `minReadySeconds` is specified.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	MinReadySeconds int32 `json:"minReadySeconds,omitempty"`
+
 	// Tolerations
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`

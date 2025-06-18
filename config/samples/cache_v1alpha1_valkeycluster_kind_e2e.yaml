@@ -9,6 +9,7 @@ spec:
   image: valkey-server:latest
   shards: 1
   replicas: 1
+  minReadySeconds: 10
   resources:
     limits:
       cpu: "0.4"
