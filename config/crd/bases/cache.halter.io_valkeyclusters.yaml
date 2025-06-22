@@ -50,6 +50,7 @@ spec:
                 description: Valkey docker image to use
                 type: string
               minReadySeconds:
+                default: 10
                 description: |-
                   An optional field that specifies the minimum number of seconds for which a
                   newly created Pod should be ready without any of its containers crashing, for

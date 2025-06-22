@@ -63,6 +63,7 @@ type ValkeyClusterSpec struct {
 	// NOTE: If support for `progressDeadlineSeconds` is added in future, it must be
 	// greater than `minReadySeconds` if `minReadySeconds` is specified.
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// +kubebuilder:default=10
 	MinReadySeconds int32 `json:"minReadySeconds,omitempty"`
 
 	// Tolerations
