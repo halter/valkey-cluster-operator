@@ -341,6 +341,21 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 
+		if found.Spec.MinReadySeconds != valkeyCluster.Spec.MinReadySeconds {
+			log.Info(fmt.Sprintf("StatefulSet needs to change minReadySeconds from %d to %d", found.Spec.MinReadySeconds, valkeyCluster.Spec.MinReadySeconds))
+			found.Spec.MinReadySeconds = valkeyCluster.Spec.MinReadySeconds
+			if err := r.Update(ctx, found); err != nil {
+				log.Error(err, "Failed to update ValkeyCluster minReadySeconds")
+				return ctrl.Result{}, err
+			}
+			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
+				fmt.Sprintf("StatefulSet MinReadySeconds %s/%s is updated", found.Namespace, found.Name))
+
+			log.Info("StatefulSet minReadySeconds updated")
+
+			return ctrl.Result{Requeue: true}, nil
+		}
+
 		foundLimits := foundResources.Limits
 		if foundLimits == nil {
 			found.Spec.Template.Spec.Containers[0].Resources.Limits = valkeyCluster.Spec.Resources.Limits
