@@ -49,6 +49,18 @@ spec:
               image:
                 description: Valkey docker image to use
                 type: string
+              minReadySeconds:
+                default: 10
+                description: |-
+                  An optional field that specifies the minimum number of seconds for which a
+                  newly created Pod should be ready without any of its containers crashing, for
+                  it to be considered available.
+                  This defaults to 0 (the Pod will be considered available as soon as it is ready).
+
+                  NOTE: If support for `progressDeadlineSeconds` is added in future, it must be
+                  greater than `minReadySeconds` if `minReadySeconds` is specified.
+                format: int32
+                type: integer
               nodeSelector:
                 additionalProperties:
                   type: string

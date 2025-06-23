@@ -300,6 +300,96 @@ var _ = Describe("controller", Ordered, func() {
 			}
 			EventuallyWithOffset(1, verifyPodResources, 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
+		It("change minReadySeconds", func() {
+			verifyClusterMinReadySeconds := func() error {
+				cmd := exec.Command("kubectl",
+					"-n", namespace,
+					"get", "valkeycluster",
+					"valkeycluster-sample", "-o", "jsonpath={.spec.minReadySeconds}",
+				)
+				minReadySeconds, err := utils.Run(cmd)
+				fmt.Println(string(minReadySeconds))
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				if string(minReadySeconds) != "10" {
+					return fmt.Errorf("expected minReadySeconds value of 10 for valkeycluster but got %s", minReadySeconds)
+				}
+				return nil
+			}
+			Eventually(verifyClusterMinReadySeconds, time.Minute, time.Second).Should(Succeed())
+
+			verifyStatefulSetMinReadySeconds := func() error {
+				cmd := exec.Command("kubectl",
+					"-n", namespace,
+					"get", "statefulset",
+					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+					"-o", "go-template={{ range .items }}"+
+						"{{ .spec.minReadySeconds }}"+
+						"{{ \"\\n\" }}{{ end }}",
+				)
+				statefulSetOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				statefulSetMinReadyValues := utils.GetNonEmptyLines(string(statefulSetOutput))
+				if len(statefulSetMinReadyValues) != 2 {
+					return fmt.Errorf("expected 2 statefulsets running, but got %d", len(statefulSetMinReadyValues))
+				}
+				for _, v := range statefulSetMinReadyValues {
+					if v != "10" {
+						return fmt.Errorf("expected minReadySeconds value of 10 for statefulset but got %s", v)
+					}
+				}
+				return nil
+			}
+			Eventually(verifyStatefulSetMinReadySeconds, time.Minute, time.Second).Should(Succeed())
+
+			patchCmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				`-p=[{"op":"replace","path":"/spec/minReadySeconds","value":15}]`,
+			)
+			_, err := utils.Run(patchCmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+			reverifyClusterMinReadySeconds := func() error {
+				cmd := exec.Command("kubectl",
+					"-n", namespace,
+					"get", "valkeycluster",
+					"valkeycluster-sample", "-o", "jsonpath={.spec.minReadySeconds}",
+				)
+				minReadySeconds, err := utils.Run(cmd)
+				fmt.Println(string(minReadySeconds))
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				if string(minReadySeconds) != "15" {
+					return fmt.Errorf("expected minReadySeconds value of 15 for valkeycluster but got %s", minReadySeconds)
+				}
+				return nil
+			}
+			Eventually(reverifyClusterMinReadySeconds, time.Minute, time.Second).Should(Succeed())
+
+			reverifyStatefulSetMinReadySeconds := func() error {
+				cmd := exec.Command("kubectl",
+					"-n", namespace,
+					"get", "statefulset",
+					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+					"-o", "go-template={{ range .items }}"+
+						"{{ .spec.minReadySeconds }}"+
+						"{{ \"\\n\" }}{{ end }}",
+				)
+				statefulSetOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				statefulSetMinReadyValues := utils.GetNonEmptyLines(string(statefulSetOutput))
+				if len(statefulSetMinReadyValues) != 2 {
+					return fmt.Errorf("expected 2 statefulsets running, but got %d", len(statefulSetMinReadyValues))
+				}
+				for _, v := range statefulSetMinReadyValues {
+					if v != "15" {
+						return fmt.Errorf("expected minReadySeconds value of 15 for statefulset but got %s", v)
+					}
+				}
+				return nil
+			}
+			Eventually(reverifyStatefulSetMinReadySeconds, time.Minute, time.Second).Should(Succeed())
+		})
 		It("change storage", func() {
 			Skip("local storage provisioner cannot resize storage")
 			cmd := exec.Command("kubectl",

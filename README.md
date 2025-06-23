@@ -62,6 +62,9 @@ $ dagger call build-and-load-locally --sock /var/run/docker.sock
   ): Void 32.6s
 ```
 
+> [!WARNING]
+> Make sure that you don't run `make test-e2e` instead as it will generate binaries specific to your platform (in `bin`) and will also load the built image into Docker, instead of into your kind cluster.
+
 Once done, you'll want to execute the following command to run the e2e test suite:
 
 ```console
