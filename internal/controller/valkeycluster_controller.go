@@ -262,6 +262,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 
+		// check if any update is occuring for stateful set, if so re-schedule reconcile
+		if found.Status.CurrentRevision != found.Status.UpdateRevision {
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+
 		// We can simply change the number of replicas inside the shard as that has no impact on data availabilty
 		if *found.Spec.Replicas != (statefulSetSize(valkeyCluster)) && *found.Spec.Replicas < (statefulSetSize(valkeyCluster)) {
 			log.Info(fmt.Sprintf("StatefulSet needs to increase replicas from %d to %d", *found.Spec.Replicas, (valkeyCluster.Spec.Shards + valkeyCluster.Spec.Replicas)))
