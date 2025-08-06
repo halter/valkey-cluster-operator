@@ -1280,7 +1280,8 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 			Labels:    ls,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas: &size,
+			ServiceName: valkeyCluster.Name + "-headless",
+			Replicas:    &size,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
@@ -1381,7 +1382,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								},
 							},
 							WorkingDir: "/data",
-							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-ip $POD_IP --cluster-announce-hostname "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}" --cluster-announce-human-nodename $HOSTNAME`},
+							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-hostname "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}" --cluster-announce-human-nodename $HOSTNAME`},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "valkey-data",
