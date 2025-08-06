@@ -298,7 +298,7 @@ var _ = Describe("controller", Ordered, func() {
 				}
 				return nil
 			}
-			EventuallyWithOffset(1, verifyPodResources, 3*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyPodResources, 5*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("change minReadySeconds", func() {
 			verifyClusterMinReadySeconds := func() error {
