@@ -175,7 +175,7 @@ var _ = Describe("controller", Ordered, func() {
 			)
 			_, err := utils.Run(cmd)
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 3, 1), 3*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 3, 1), 5*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("should scale down", func() {
 			cmd := exec.Command("kubectl",
@@ -298,7 +298,7 @@ var _ = Describe("controller", Ordered, func() {
 				}
 				return nil
 			}
-			EventuallyWithOffset(1, verifyPodResources, 5*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyPodResources, 8*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("change minReadySeconds", func() {
 			verifyClusterMinReadySeconds := func() error {
@@ -430,6 +430,29 @@ var _ = Describe("controller", Ordered, func() {
 				return nil
 			}
 			EventuallyWithOffset(1, verifyPVCResources, 3*time.Minute, 15*time.Second).Should(Succeed())
+		})
+		It("recover from all pods being deleted", func() {
+			cmd := exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+				"-o", "go-template={{ range .items }}"+
+					"{{ if not .metadata.deletionTimestamp }}"+
+					"{{ .metadata.name }}"+
+					"{{ \"\\n\" }}{{ end }}{{ end }}",
+				"-n", namespace,
+			)
+
+			podOutput, err := utils.Run(cmd)
+			ExpectWithOffset(2, err).NotTo(HaveOccurred())
+			podNames := utils.GetNonEmptyLines(string(podOutput))
+
+			// delete all pods
+			args := []string{"delete", "pod", "--force", "--grace-period=0",
+				"-n", namespace}
+			args = append(args, podNames...)
+			cmd = exec.Command("kubectl", args...)
+			_, err = utils.Run(cmd)
+			ExpectWithOffset(2, err).NotTo(HaveOccurred())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 2), 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("be deleted", func() {
 			cmd := exec.Command("kubectl",

@@ -1225,8 +1225,9 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 				}
 			}
 
+			found.Spec = svc.Spec
 			if needsUpdate {
-				if err := r.Update(ctx, svc); err != nil {
+				if err := r.Update(ctx, found); err != nil {
 					logger.Error(err, "failed to update Service")
 					return err
 				}
@@ -1350,6 +1351,11 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								PreStop: &corev1.LifecycleHandler{
 									Exec: &corev1.ExecAction{
 										Command: []string{"/bin/sh", "/scripts/pre_stop.sh"},
+									},
+								},
+								PostStart: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"/bin/sh", "/scripts/post_start.sh"},
 									},
 								},
 							},
@@ -1510,6 +1516,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 		logger.Error(err, "failed to read pre_stop.sh")
 		return err
 	}
+	postStart, err := scripts.ReadFile("scripts/post_start.sh")
+	if err != nil {
+		logger.Error(err, "failed to read post_start.sh")
+		return err
+	}
 	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
 	if err != nil {
 		logger.Error(err, "failed to read valkey.conf")
@@ -1523,8 +1534,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 			Labels:    ls,
 		},
 		Data: map[string]string{
-			"pre_stop.sh": string(preStop),
-			"valkey.conf": string(valkeyConf),
+			"pre_stop.sh":   string(preStop),
+			"post_start.sh": string(postStart),
+			"valkey.conf":   string(valkeyConf),
 		},
 	}
 	if err := controllerutil.SetControllerReference(valkeyCluster, cm, r.Scheme); err != nil {
