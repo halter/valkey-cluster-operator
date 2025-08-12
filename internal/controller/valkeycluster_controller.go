@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -232,8 +233,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err != nil && apierrors.IsNotFound(err) {
 			log.Info(fmt.Sprintf("StatefulSet %s not found", stsName))
 			// Define a new statefulset
-			sts, err := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
-			if err != nil {
+			sts := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
+			// Set the ownerRef for the StatefulSet
+			// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
+			if err := ctrl.SetControllerReference(valkeyCluster, sts, r.Scheme); err != nil {
 				log.Error(err, "Failed to define new StatefulSet resource for ValkeyCluster")
 
 				// The following implementation will update the status
@@ -271,6 +274,64 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 		// check if any update is occuring for stateful set, if so re-schedule reconcile
 		if found.Status.CurrentRevision != found.Status.UpdateRevision {
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+
+		// update containers[0].Command if there is a difference
+		// Update if there is a difference in the following attributes:
+		// Command
+		// Lifecycle
+		// Env
+		desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
+		if !(cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) &&
+			cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) &&
+			cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)) {
+
+			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) {
+				log.Info(fmt.Sprintf("StatefulSet %s Command is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command)))
+			}
+			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) {
+				log.Info(fmt.Sprintf("StatefulSet %s Lifecycle is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle)))
+			}
+			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env) {
+				log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
+			}
+
+			found := &appsv1.StatefulSet{}
+			err = r.Get(ctx, types.NamespacedName{Name: stsName, Namespace: valkeyCluster.Namespace}, found)
+			if err != nil {
+				log.Error(err, "Failed to get StatefulSet")
+				// Let's return the error for the reconciliation be re-trigged again
+				return ctrl.Result{}, err
+			}
+			found.Spec.Template.Spec.Containers[0].Command = desired.Spec.Template.Spec.Containers[0].Command
+			found.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
+			found.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
+
+			if err = r.Update(ctx, found); err != nil {
+				log.Error(err, "Failed to update StatefulSet",
+					"StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
+
+				if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
+					log.Error(err, "Failed to re-fetch valkeyCluster")
+					return ctrl.Result{}, err
+				}
+
+				meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
+					Status: metav1.ConditionFalse, Reason: "Reconciling",
+					Message: fmt.Sprintf("Failed to update StatefulSet containers (%s): (%s)", valkeyCluster.Name, err)})
+
+				if err := r.Status().Update(ctx, valkeyCluster); err != nil {
+					log.Error(err, "Failed to update ValkeyCluster status")
+					return ctrl.Result{}, err
+				}
+
+				return ctrl.Result{}, err
+			}
+
+			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
+				fmt.Sprintf("StatefulSet Containers are updated for %s/%s", found.Namespace, found.Name))
+
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
 
@@ -1246,7 +1307,7 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 }
 
 // statefulSet returns a ValkeyCluster StatefulSet object
-func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyCluster *cachev1alpha1.ValkeyCluster) (*appsv1.StatefulSet, error) {
+func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyCluster *cachev1alpha1.ValkeyCluster) *appsv1.StatefulSet {
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
 	ls["statefulset.kubernetes.io/sts-name"] = name
 
@@ -1378,7 +1439,8 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 									Name: "POD_IP",
 									ValueFrom: &corev1.EnvVarSource{
 										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "status.podIP",
+											APIVersion: "v1",
+											FieldPath:  "status.podIP",
 										},
 									},
 								},
@@ -1471,13 +1533,8 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 			}},
 		},
 	}
-	// Set the ownerRef for the StatefulSet
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
-	if err := ctrl.SetControllerReference(valkeyCluster, sts, r.Scheme); err != nil {
-		return nil, err
-	}
 
-	return sts, nil
+	return sts
 }
 
 // labelsForValkeyCluster returns the labels for selecting the resources
