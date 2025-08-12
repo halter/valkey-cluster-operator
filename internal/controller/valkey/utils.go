@@ -13,6 +13,7 @@ import (
 type ClusterNode struct {
 	Pod          string
 	IP           string
+	Hostname     string
 	ID           string
 	MasterNodeID string
 	Flags        []string
@@ -91,6 +92,10 @@ func parseClusterNodeLine(line string) (*ClusterNode, error) {
 		}
 	}
 	IP := strings.Split(fields[1], ":")[0]
+	hostname := ""
+	if strings.Contains(fields[1], ",") {
+		hostname = strings.Split(fields[1], ",")[1]
+	}
 	ID := strings.ReplaceAll(fields[0], "txt:", "")
 	MasterNodeID := fields[3]
 	if MasterNodeID == "-" {
@@ -98,6 +103,7 @@ func parseClusterNodeLine(line string) (*ClusterNode, error) {
 	}
 	return &ClusterNode{
 		IP:           IP,
+		Hostname:     hostname,
 		ID:           ID,
 		MasterNodeID: MasterNodeID,
 		Flags:        flagsWithoutMyself,

@@ -85,6 +85,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups=cache.halter.io,resources=valkeyclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
@@ -214,6 +215,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	err = r.upsertConfigMap(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to upsert configmap")
+		return ctrl.Result{}, err
+	}
+
+	err = r.upsertHeadlessService(ctx, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to upsert Service")
 		return ctrl.Result{}, err
 	}
 
@@ -1171,6 +1178,73 @@ func (r *ValkeyClusterReconciler) persistentVolumeClaim(name string, valkeyClust
 	return pvc, nil
 }
 
+func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) error {
+	logger := log.FromContext(ctx)
+	logger.Info("upserting headless service")
+
+	name := valkeyCluster.Name + "-headless"
+	ls := labelsForValkeyCluster(valkeyCluster.Name)
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: valkeyCluster.Namespace,
+			Labels:    ls,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector:  ls,
+			ClusterIP: "None",
+			Ports: []corev1.ServicePort{
+				{
+					Port:       6379,
+					TargetPort: intstr.FromInt(6379),
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(valkeyCluster, svc, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, svc); err != nil {
+		if errors.IsAlreadyExists(err) {
+			found := &corev1.Service{}
+			if err = r.Get(ctx, types.NamespacedName{Name: name, Namespace: valkeyCluster.Namespace}, found); err != nil {
+				logger.Error(err, "failed to get Service")
+			}
+			needsUpdate := false
+
+			if len(found.Spec.Ports) != len(svc.Spec.Ports) {
+				needsUpdate = true
+			} else {
+				for i, port := range found.Spec.Ports {
+					if port.Port != svc.Spec.Ports[i].Port {
+						needsUpdate = true
+					}
+					if port.TargetPort != svc.Spec.Ports[i].TargetPort {
+						needsUpdate = true
+					}
+				}
+			}
+
+			found.Spec = svc.Spec
+			if needsUpdate {
+				if err := r.Update(ctx, found); err != nil {
+					logger.Error(err, "failed to update Service")
+					return err
+				}
+				logger.Info("Service updated")
+			}
+		} else {
+			logger.Error(err, "failed to create Service")
+			return err
+		}
+	} else {
+		r.Recorder.Event(valkeyCluster, "Normal", "Created",
+			fmt.Sprintf("Service %s/%s is created", valkeyCluster.Namespace, name))
+	}
+	return nil
+
+}
+
 // statefulSet returns a ValkeyCluster StatefulSet object
 func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyCluster *cachev1alpha1.ValkeyCluster) (*appsv1.StatefulSet, error) {
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
@@ -1207,7 +1281,8 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 			Labels:    ls,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas: &size,
+			ServiceName: valkeyCluster.Name + "-headless",
+			Replicas:    &size,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
@@ -1278,6 +1353,11 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 										Command: []string{"/bin/sh", "/scripts/pre_stop.sh"},
 									},
 								},
+								PostStart: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"/bin/sh", "/scripts/post_start.sh"},
+									},
+								},
 							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -1302,9 +1382,13 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 										},
 									},
 								},
+								{
+									Name:  "NODE_HOSTNAME_SUFFIX",
+									Value: "." + valkeyCluster.Name + "-headless." + valkeyCluster.Namespace + ".svc.cluster.local",
+								},
 							},
 							WorkingDir: "/data",
-							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-ip $POD_IP`},
+							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-hostname "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}" --cluster-announce-human-nodename $HOSTNAME`},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "valkey-data",
@@ -1432,6 +1516,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 		logger.Error(err, "failed to read pre_stop.sh")
 		return err
 	}
+	postStart, err := scripts.ReadFile("scripts/post_start.sh")
+	if err != nil {
+		logger.Error(err, "failed to read post_start.sh")
+		return err
+	}
 	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
 	if err != nil {
 		logger.Error(err, "failed to read valkey.conf")
@@ -1445,8 +1534,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 			Labels:    ls,
 		},
 		Data: map[string]string{
-			"pre_stop.sh": string(preStop),
-			"valkey.conf": string(valkeyConf),
+			"pre_stop.sh":   string(preStop),
+			"post_start.sh": string(postStart),
+			"valkey.conf":   string(valkeyConf),
 		},
 	}
 	if err := controllerutil.SetControllerReference(valkeyCluster, cm, r.Scheme); err != nil {
