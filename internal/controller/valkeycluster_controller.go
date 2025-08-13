@@ -1450,7 +1450,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								},
 							},
 							WorkingDir: "/data",
-							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-hostname "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}" --cluster-announce-human-nodename $HOSTNAME`},
+							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-human-nodename "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}"`},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "valkey-data",
