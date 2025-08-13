@@ -227,9 +227,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Check if the statefulset already exists, if not create a new one
 	for stsIdx := 0; stsIdx < int(valkeyCluster.Spec.Shards); stsIdx++ {
-		found := &appsv1.StatefulSet{}
 		stsName := fmt.Sprintf("%s-%d", valkeyCluster.Name, stsIdx)
-		err = r.Get(ctx, types.NamespacedName{Name: stsName, Namespace: valkeyCluster.Namespace}, found)
+		found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
 		if err != nil && apierrors.IsNotFound(err) {
 			log.Info(fmt.Sprintf("StatefulSet %s not found", stsName))
 			// Define a new statefulset
@@ -378,8 +377,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 		foundRequests := foundResources.Requests
 		if foundRequests == nil {
+			found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+			if err != nil {
+				log.Error(err, "Failed to find sts by index")
+				return ctrl.Result{}, err
+			}
 			found.Spec.Template.Spec.Containers[0].Resources.Requests = valkeyCluster.Spec.Resources.Requests
-			err := r.Update(ctx, found)
+			err = r.Update(ctx, found)
 			if err != nil {
 				log.Error(err, "Failed to update ValkeyCluster resource requests")
 				return ctrl.Result{}, err
@@ -390,8 +394,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		} else {
 			// scaling up
 			if foundRequests.Cpu().Cmp(*valkeyCluster.Spec.Resources.Requests.Cpu()) == -1 {
+				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+				if err != nil {
+					log.Error(err, "Failed to find sts by index")
+					return ctrl.Result{}, err
+				}
 				found.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = *valkeyCluster.Spec.Resources.Requests.Cpu()
-				err := r.Update(ctx, found)
+				err = r.Update(ctx, found)
 				if err != nil {
 					log.Error(err, "Failed to update ValkeyCluster resources")
 					return ctrl.Result{}, err
@@ -402,8 +411,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			// scaling up
 			if foundRequests.Memory().Cmp(*valkeyCluster.Spec.Resources.Requests.Memory()) == -1 {
+				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+				if err != nil {
+					log.Error(err, "Failed to find sts by index")
+					return ctrl.Result{}, err
+				}
 				found.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = *valkeyCluster.Spec.Resources.Requests.Memory()
-				err := r.Update(ctx, found)
+				err = r.Update(ctx, found)
 				if err != nil {
 					log.Error(err, "Failed to update ValkeyCluster resources")
 					return ctrl.Result{}, err
@@ -415,6 +429,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 
 		if found.Spec.MinReadySeconds != valkeyCluster.Spec.MinReadySeconds {
+			found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+			if err != nil {
+				log.Error(err, "Failed to find sts by index")
+				return ctrl.Result{}, err
+			}
 			log.Info(fmt.Sprintf("StatefulSet needs to change minReadySeconds from %d to %d", found.Spec.MinReadySeconds, valkeyCluster.Spec.MinReadySeconds))
 			found.Spec.MinReadySeconds = valkeyCluster.Spec.MinReadySeconds
 			if err := r.Update(ctx, found); err != nil {
@@ -431,8 +450,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 		foundLimits := foundResources.Limits
 		if foundLimits == nil {
+			found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+			if err != nil {
+				log.Error(err, "Failed to find sts by index")
+				return ctrl.Result{}, err
+			}
 			found.Spec.Template.Spec.Containers[0].Resources.Limits = valkeyCluster.Spec.Resources.Limits
-			err := r.Update(ctx, found)
+			err = r.Update(ctx, found)
 			if err != nil {
 				log.Error(err, "Failed to update ValkeyCluster resource limits")
 				return ctrl.Result{}, err
@@ -443,8 +467,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		} else {
 			// scaling up
 			if foundLimits.Cpu().Cmp(*valkeyCluster.Spec.Resources.Limits.Cpu()) == -1 {
+				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+				if err != nil {
+					log.Error(err, "Failed to find sts by index")
+					return ctrl.Result{}, err
+				}
 				found.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = *valkeyCluster.Spec.Resources.Limits.Cpu()
-				err := r.Update(ctx, found)
+				err = r.Update(ctx, found)
 				if err != nil {
 					log.Error(err, "Failed to update ValkeyCluster resources")
 					return ctrl.Result{}, err
@@ -455,8 +484,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			// scaling up
 			if foundLimits.Memory().Cmp(*valkeyCluster.Spec.Resources.Limits.Memory()) == -1 {
+				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
+				if err != nil {
+					log.Error(err, "Failed to find sts by index")
+					return ctrl.Result{}, err
+				}
 				found.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = *valkeyCluster.Spec.Resources.Limits.Memory()
-				err := r.Update(ctx, found)
+				err = r.Update(ctx, found)
 				if err != nil {
 					log.Error(err, "Failed to update ValkeyCluster resources")
 					return ctrl.Result{}, err
@@ -1669,4 +1703,11 @@ func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCl
 		return "", "", fmt.Errorf("Failed executing command 'valkey-cli %s': stdout: %s, stderr: %s, err: %v", strings.Join(args, " "), stdout.String(), stderr.String(), err)
 	}
 	return stdout.String(), stderr.String(), nil
+}
+
+func (r *ValkeyClusterReconciler) findStatefulsetByIndex(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, idx int) (*appsv1.StatefulSet, error) {
+	found := &appsv1.StatefulSet{}
+	stsName := fmt.Sprintf("%s-%d", valkeyCluster.Name, idx)
+	err := r.Get(ctx, types.NamespacedName{Name: stsName, Namespace: valkeyCluster.Namespace}, found)
+	return found, err
 }
