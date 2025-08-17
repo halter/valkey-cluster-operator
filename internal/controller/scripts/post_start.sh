@@ -1,6 +1,6 @@
 #!/bin/sh
 
-SCRIPT_TIMEOUT=15
+SCRIPT_TIMEOUT=10
 start_time=$(date +%s)
 end_time=$((start_time + SCRIPT_TIMEOUT))
 
@@ -16,12 +16,12 @@ echo "$(date --rfc-3339=seconds): post_start.sh begin" >>/data/logs/post_start.l
 awk -F, '/nodename=/ && !/myself/ { split($5, arr, "="); print arr[2] }' nodes.conf | while IFS= read -r host; do
 	(
 		while [ "$(date +%s)" -lt "$end_time" ]; do
-			RESPONSE=$(valkey-cli -t 2 -h "$host" -p 6379 -c ping)
+			RESPONSE=$(valkey-cli -t 1 -h "$host" -p 6379 -c ping)
 			if [ "$RESPONSE" = "PONG" ]; then
 				echo "$(date --rfc-3339=seconds): PONG response from $host" >>/data/logs/post_start.log
 				ipaddress=$(LC_ALL=C nslookup "$host" 2>/dev/null | sed -nr '/Name/,+1s|Address(es)?: *||p')
 				echo "$(date --rfc-3339=seconds): MEET $ipaddress" >>/data/logs/post_start.log
-				valkey-cli -t 2 -h 127.0.0.1 -p 6379 -c cluster meet "$ipaddress" 6379
+				valkey-cli -t 1 -h 127.0.0.1 -p 6379 -c cluster meet "$ipaddress" 6379
 				break
 			else
 				sleep 1
