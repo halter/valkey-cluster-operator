@@ -123,22 +123,28 @@ func (m *ValkeyClusterOperator) PublishValkeyDocker(
 	ctx context.Context,
 	ghToken *dagger.Secret,
 ) error {
-	// container registry for the multi-platform image
-	imageRepo := "ghcr.io/" + GITHUB_ORG + "/valkey-server:8.0.2"
 
-	platformVariants, err := m.BuildValkeyContainerImage(ctx)
-	if err != nil {
+	valkeyVersions := []string{"8.0.2", "8.1.3"}
+
+	for _, valkeyVersion := range valkeyVersions {
+		// container registry for the multi-platform image
+		imageRepo := "ghcr.io/" + GITHUB_ORG + "/valkey-server:" + valkeyVersion
+
+		platformVariants, err := m.BuildValkeyContainerImage(ctx, valkeyVersion)
+		if err != nil {
+			return err
+		}
+
+		// publish to registry
+		_, err = dag.Container().
+			WithRegistryAuth("ghcr.io", GITHUB_ORG, ghToken).
+			Publish(ctx, imageRepo, dagger.ContainerPublishOpts{
+				PlatformVariants: platformVariants,
+			})
+
 		return err
 	}
-
-	// publish to registry
-	_, err = dag.Container().
-		WithRegistryAuth("ghcr.io", GITHUB_ORG, ghToken).
-		Publish(ctx, imageRepo, dagger.ContainerPublishOpts{
-			PlatformVariants: platformVariants,
-		})
-
-	return err
+	return nil
 }
 
 // Build the application container
@@ -166,13 +172,13 @@ func (m *ValkeyClusterOperator) Build(
 // Build the valkey container
 func (m *ValkeyClusterOperator) BuildValkeyContainerImage(
 	ctx context.Context,
+	valkeyVersion string,
 ) ([]*dagger.Container, error) {
 
 	var platforms = []dagger.Platform{
 		"linux/amd64", // a.k.a. x86_64
 		"linux/arm64", // a.k.a. aarch64
 	}
-	valkeyVersion := "8.0.2"
 
 	platformVariants := make([]*dagger.Container, 0, len(platforms))
 	for _, platform := range platforms {
@@ -272,7 +278,7 @@ func (m *ValkeyClusterOperator) BuildAndLoadLocally(
 		return err
 	}
 
-	valkeyVariants, err := m.BuildValkeyContainerImage(ctx)
+	valkeyVariants, err := m.BuildValkeyContainerImage(ctx, "8.0.2")
 	if err != nil {
 		return err
 	}
