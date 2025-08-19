@@ -3,9 +3,9 @@ name: publish-branch
 permissions: write-all
 
 on:
-  push:
+  pull_request:
     branches:
-      - '!main'
+      - main
 
 jobs:
   publish:
