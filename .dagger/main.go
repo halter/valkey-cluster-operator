@@ -141,8 +141,9 @@ func (m *ValkeyClusterOperator) PublishValkeyDocker(
 			Publish(ctx, imageRepo, dagger.ContainerPublishOpts{
 				PlatformVariants: platformVariants,
 			})
-
-		return err
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
