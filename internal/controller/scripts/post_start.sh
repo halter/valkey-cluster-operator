@@ -1,5 +1,7 @@
 #!/bin/sh
 
+. /scripts/utils.sh
+
 SCRIPT_TIMEOUT=10
 start_time=$(date +%s)
 end_time=$((start_time + SCRIPT_TIMEOUT))
@@ -9,21 +11,26 @@ end_time=$((start_time + SCRIPT_TIMEOUT))
 # node hostname to a coreDNS record causes some trouble for clients that don't
 # respect cluster-preferred-endpoint-type when connection from outside kubernetes
 
-mkdir -p /data/logs
-
-echo "$(date --rfc-3339=seconds): post_start.sh begin" >>/data/logs/post_start.log
+msg post_start begin
 
 awk -F, '/nodename=/ && !/myself/ { split($5, arr, "="); print arr[2] }' nodes.conf | while IFS= read -r host; do
 	(
 		while [ "$(date +%s)" -lt "$end_time" ]; do
-			RESPONSE=$(valkey-cli -t 1 -h "$host" -p 6379 -c ping)
+
+			msg post_start "valkey_cli $host 6379 -t 1 -c ping"
+			RESPONSE=$(valkey_cli "$host" 6379 -t 1 -c ping)
+
 			if [ "$RESPONSE" = "PONG" ]; then
-				echo "$(date --rfc-3339=seconds): PONG response from $host" >>/data/logs/post_start.log
-				ipaddress=$(LC_ALL=C nslookup "$host" 2>/dev/null | sed -nr '/Name/,+1s|Address(es)?: *||p')
-				echo "$(date --rfc-3339=seconds): MEET $ipaddress" >>/data/logs/post_start.log
-				valkey-cli -t 1 -h 127.0.0.1 -p 6379 -c cluster meet "$ipaddress" 6379
+				msg post_start "PONG response from $host"
+
+				ipaddress=$(getent hosts "$host" | awk '{ print $1 }')
+
+				msg post_start "MEET $ipaddress"
+
+				valkey_cli 127.0.0.1 6379 -t 1 -c cluster meet "$ipaddress" 6379
 				break
 			else
+				msg post_start "got response from $host: ${RESPONSE}"
 				sleep 1
 				continue
 			fi
@@ -34,4 +41,4 @@ done
 
 wait
 
-echo "$(date --rfc-3339=seconds): post_start.sh end" >>/data/logs/post_start.log
+msg post_start end

@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,6 +65,32 @@ func Run(cmd *exec.Cmd) ([]byte, error) {
 	}
 
 	return output, nil
+}
+
+func RunWithSplitOutput(cmd *exec.Cmd) ([]byte, []byte, error) {
+	dir, _ := GetProjectDir()
+	cmd.Dir = dir
+
+	if err := os.Chdir(cmd.Dir); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "chdir dir: %s\n", err)
+	}
+
+	cmd.Env = append(os.Environ(), "GO111MODULE=on")
+	command := strings.Join(cmd.Args, " ")
+	_, _ = fmt.Fprintf(GinkgoWriter, "running: %s\n", command)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	stdoutBytes := stdout.Bytes()
+	stderrBytes := stderr.Bytes()
+	if err != nil {
+		return stdoutBytes, stderrBytes, fmt.Errorf("%s failed with error: (%v) %s", command, err, string(stdoutBytes))
+	}
+
+	return stdout.Bytes(), stderr.Bytes(), nil
 }
 
 // UninstallPrometheusOperator uninstalls the prometheus

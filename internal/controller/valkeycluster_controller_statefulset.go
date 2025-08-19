@@ -70,6 +70,11 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 		}
 	}
 
+	metricsContainerArgs := []string{"-is-cluster"}
+	if valkeyCluster.Spec.Password != "" {
+		metricsContainerArgs = append(metricsContainerArgs, "--redis.password", valkeyCluster.Spec.Password)
+	}
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -205,7 +210,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 							},
 						},
 						{
-							Image:           "quay.io/oliver006/redis_exporter:v1.73.0-alpine",
+							Image:           "quay.io/oliver006/redis_exporter:v1.75.0-alpine",
 							Name:            "valkey-exporter",
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Resources: *&corev1.ResourceRequirements{
@@ -221,7 +226,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: 9121,
-									Name:          "metrivs",
+									Name:          "metrics",
 								},
 							},
 							ReadinessProbe: &corev1.Probe{
@@ -238,7 +243,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 									},
 								},
 							},
-							Args: []string{"-is-cluster"},
+							Args: metricsContainerArgs,
 						},
 					},
 					Volumes: []corev1.Volume{
@@ -318,7 +323,7 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 			// StatefulSet created successfully
 			// We will requeue the reconciliation so that we can ensure the state
 			// and move forward for the next operations
-			return &ctrl.Result{RequeueAfter: time.Minute}, nil
+			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		} else if err != nil {
 			log.Error(err, "Failed to get StatefulSet")
 			// Let's return the error for the reconciliation be re-trigged again
@@ -326,8 +331,13 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 		}
 
 		// check if any update is occuring for stateful set, if so re-schedule reconcile
+		found, err = r.findStatefulsetByName(ctx, valkeyCluster.Namespace, stsName)
+		if err != nil {
+			log.Error(err, fmt.Sprintf("Failed to get StatefulSet %s/%s", valkeyCluster.Namespace, stsName))
+			return &ctrl.Result{}, err
+		}
 		if found.Status.CurrentRevision != found.Status.UpdateRevision {
-			return &ctrl.Result{RequeueAfter: time.Minute}, nil
+			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 
 		// update containers[0].Command if there is a difference
@@ -335,27 +345,13 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 		// Command
 		// Lifecycle
 		// Env
-		desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
-		if !(cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) &&
-			cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) &&
-			cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)) {
-
-			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) {
-				log.Info(fmt.Sprintf("StatefulSet %s Command is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command)))
-			}
-			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) {
-				log.Info(fmt.Sprintf("StatefulSet %s Lifecycle is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle)))
-			}
-			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env) {
-				log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
-			}
-
-			err := r.updateStatefulSet(ctx, valkeyCluster.Namespace, stsName, func(ss *appsv1.StatefulSet) *appsv1.StatefulSet {
-				ss.Spec.Template.Spec.Containers[0].Command = desired.Spec.Template.Spec.Containers[0].Command
-				ss.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
-				ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
-				return ss
-			})
+		diff, err := r.compareActualToDesiredStatefulSet(ctx, valkeyCluster, stsName)
+		if err != nil {
+			log.Error(err, fmt.Sprintf("Failed to compare actual and desired StatefulSet %s/%s", valkeyCluster.Namespace, stsName))
+			return &ctrl.Result{}, err
+		}
+		if diff {
+			err := r.updateStatefulSet(ctx, valkeyCluster.Namespace, stsName, r.applyDesiredStatefulSetSpec(valkeyCluster, stsName))
 
 			if err != nil {
 				log.Error(err, "Failed to update StatefulSet",
@@ -366,7 +362,7 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
 				fmt.Sprintf("StatefulSet Containers are updated for %s/%s", found.Namespace, found.Name))
 
-			return &ctrl.Result{RequeueAfter: time.Minute}, nil
+			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 
 		// We can simply change the number of replicas inside the shard as that has no impact on data availabilty
@@ -494,4 +490,56 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 		}
 	}
 	return nil, nil
+}
+
+// Compares actual to desired, and returns true if there is a difference in any of the following:
+// - valkey-server command
+// - valkey-server lifecycle
+// - valkey-server environment
+// - metrics command
+// It's really important that you consider updating applyDesiredStatefulSetSpec if this function changes
+func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, stsName string) (bool, error) {
+	log := log.FromContext(ctx)
+	actual, err := r.findStatefulsetByName(ctx, valkeyCluster.Namespace, stsName)
+	if err != nil {
+		return false, err
+	}
+
+	desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
+
+	diff := false
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) {
+		log.Info(fmt.Sprintf("StatefulSet %s Command is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command)))
+		diff = true
+	}
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) {
+		log.Info(fmt.Sprintf("StatefulSet %s Lifecycle is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle)))
+		diff = true
+	}
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env) {
+		log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
+		diff = true
+	}
+
+	// metrics command, this will detect if auth has been enabled
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[1].Args, desired.Spec.Template.Spec.Containers[1].Args) {
+		log.Info(fmt.Sprintf("StatefulSet %s metrics command is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[1].Args, desired.Spec.Template.Spec.Containers[1].Args)))
+		diff = true
+	}
+
+	return diff, nil
+}
+
+// It's really important that you consider updating compareActualToDesiredStatefulSet if this function changes
+func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cachev1alpha1.ValkeyCluster, stsName string) func(ss *appsv1.StatefulSet) *appsv1.StatefulSet {
+	desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
+	return func(ss *appsv1.StatefulSet) *appsv1.StatefulSet {
+		ss.Spec.Template.Spec.Containers[0].Command = desired.Spec.Template.Spec.Containers[0].Command
+		ss.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
+		ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
+
+		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
+		ss.Spec.Template.Spec.Containers[1].Image = desired.Spec.Template.Spec.Containers[1].Image
+		return ss
+	}
 }

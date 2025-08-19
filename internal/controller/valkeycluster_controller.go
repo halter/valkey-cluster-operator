@@ -17,7 +17,6 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -30,7 +29,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,7 +39,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -49,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
+	"github.com/halter/valkey-cluster-operator/internal/controller/valkey"
 	internalValkey "github.com/halter/valkey-cluster-operator/internal/controller/valkey"
 )
 
@@ -367,7 +365,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	for _, clusterNodeA := range clusterNodes {
 		for _, clusterNodeB := range clusterNodes {
 			if clusterNodeA.Pod != clusterNodeB.Pod {
-				client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{clusterNodeA.IP + fmt.Sprintf(":%d", VALKEY_PORT)}, ForceSingleClient: true})
+				client, err := r.NewValkeyClient(ctx, valkeyCluster, clusterNodeA.IP, VALKEY_PORT)
 				if err != nil {
 					log.Error(err, "Failed to create Valkey client")
 					return ctrl.Result{}, err
@@ -479,7 +477,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 			expectedSlotRanges := slotRanges[shardIdx]
 			log.Info(fmt.Sprintf("Expected slot range %+v for shard %d not found", expectedSlotRanges, shardIdx))
-			client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{clusterNodesForShard[0].IP + fmt.Sprintf(":%d", VALKEY_PORT)}, ForceSingleClient: true})
+			client, err := r.NewValkeyClient(ctx, valkeyCluster, clusterNodesForShard[0].IP, VALKEY_PORT)
 			if err != nil {
 				log.Error(err, "Failed to get client")
 				return ctrl.Result{}, err
@@ -519,7 +517,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					if cn.MasterNodeID == primary.ID {
 						continue
 					}
-					client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{cn.IP + fmt.Sprintf(":%d", VALKEY_PORT)}, ForceSingleClient: true})
+					client, err := r.NewValkeyClient(ctx, valkeyCluster, cn.IP, VALKEY_PORT)
 					if err != nil {
 						log.Error(err, "Failed to get client")
 						return ctrl.Result{}, err
@@ -550,7 +548,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				if cn.ID == primary.ID {
 					continue
 				}
-				client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{cn.IP + fmt.Sprintf(":%d", VALKEY_PORT)}, ForceSingleClient: true})
+				client, err := r.NewValkeyClient(ctx, valkeyCluster, cn.IP, VALKEY_PORT)
 				if err != nil {
 					log.Error(err, "Failed to get client")
 					return ctrl.Result{}, err
@@ -775,20 +773,25 @@ func (r *ValkeyClusterReconciler) waitForPodsToBeAccessibleViaValkey(ctx context
 			}
 		}
 		if isPodReady {
-			client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{pod.Status.PodIP + fmt.Sprintf(":%d", VALKEY_PORT)}, ForceSingleClient: true})
+			// check tcp port
+			if !valkey.TcpCheck(pod.Status.PodIP, fmt.Sprintf("%d", VALKEY_PORT)) {
+				return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			}
+
+			client, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
 			if err != nil {
 				logger.Info("Could not create valkey client, requeing")
-				return &ctrl.Result{RequeueAfter: time.Minute}, nil
+				return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 			defer client.Close()
 			_, err = client.Do(ctx, client.B().ClusterNodes().Build()).ToString()
 			if err != nil {
 				logger.Info("Could not get cluster nodes requeing")
-				return &ctrl.Result{RequeueAfter: time.Minute}, nil
+				return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 		} else {
 			logger.Info("Pod not ready", "Pod.Name", pod.Name)
-			return &ctrl.Result{RequeueAfter: time.Minute}, nil
+			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 	}
 	return nil, nil
@@ -926,7 +929,7 @@ func (r *ValkeyClusterReconciler) buildClusterNodes(ctx context.Context, valkeyC
 			}
 		}
 		if isPodReady {
-			client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{pod.Status.PodIP + fmt.Sprintf(":%d", VALKEY_PORT)}, ForceSingleClient: true})
+			client, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
 			if err != nil {
 				return nil, err
 			}
@@ -1008,38 +1011,4 @@ func imageForValkeyCluster() (string, error) {
 		return "ghcr.io/halter/valkey-server:8.0.2", nil
 	}
 	return image, nil
-}
-
-func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, args []string) (string, string, error) {
-	cmd := []string{
-		"sh",
-		"-c",
-		fmt.Sprintf("valkey-cli %s", strings.Join(args, " ")),
-	}
-
-	podName := fmt.Sprintf("%s-0-0", valkeyCluster.Name)
-
-	req := r.ClientSet.CoreV1().RESTClient().Post().Resource("pods").Name(podName).
-		Namespace(valkeyCluster.Namespace).SubResource("exec")
-	req.VersionedParams(&corev1.PodExecOptions{
-		Container: "valkey-cluster-node",
-		Command:   cmd,
-		Stdin:     false,
-		Stdout:    true,
-		Stderr:    true,
-		TTY:       false,
-	}, runtime.NewParameterCodec(r.Scheme))
-	exec, err := remotecommand.NewSPDYExecutor(r.RestConfig, "POST", req.URL())
-	if err != nil {
-		return "", "", fmt.Errorf("Failed to execute valkey-cli %s: %v", strings.Join(args, " "), err)
-	}
-	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("Failed executing command 'valkey-cli %s': stdout: %s, stderr: %s, err: %v", strings.Join(args, " "), stdout.String(), stderr.String(), err)
-	}
-	return stdout.String(), stderr.String(), nil
 }

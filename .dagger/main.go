@@ -185,6 +185,7 @@ func (m *ValkeyClusterOperator) BuildValkeyContainerImage(
 	for _, platform := range platforms {
 		opts := dagger.ContainerOpts{Platform: platform}
 		valkey := dag.Container(opts).
+			// TODO: replace with https://hub.docker.com/r/valkey/valkey/tags as bitnami are going to move everything to a paid model
 			From("bitnami/valkey:" + valkeyVersion)
 		platformVariants = append(platformVariants, valkey)
 	}

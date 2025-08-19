@@ -30,10 +30,16 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 		logger.Error(err, "failed to read post_start.sh")
 		return "", err
 	}
+	utils, err := scripts.ReadFile("scripts/utils.sh")
+	if err != nil {
+		logger.Error(err, "failed to read utils.sh")
+		return "", err
+	}
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
 	cmData := map[string]string{
 		"pre_stop.sh":   string(preStop),
 		"post_start.sh": string(postStart),
+		"utils.sh":      string(utils),
 	}
 	valkeyConfContent, err := getValkeyConfigContent(valkeyCluster)
 	if err != nil {
@@ -52,6 +58,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 			},
 		},
 		Data: cmData,
+	}
+	if valkeyCluster.Spec.Password != "" {
+		cm.Data["password"] = valkeyCluster.Spec.Password
 	}
 	if err := controllerutil.SetControllerReference(valkeyCluster, cm, r.Scheme); err != nil {
 		return "", err
@@ -98,6 +107,10 @@ func getValkeyConfigContent(valkeyCluster *cachev1alpha1.ValkeyCluster) (string,
 	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
 	if err != nil {
 		return "", err
+	}
+	if valkeyCluster.Spec.Password != "" {
+		valkeyConf = []byte(fmt.Sprintf("%[1]s\nrequirepass %[2]s\nprimaryauth %[2]s", string(valkeyConf), valkeyCluster.Spec.Password))
+
 	}
 	return string(valkeyConf), nil
 }
