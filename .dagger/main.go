@@ -92,6 +92,10 @@ func (m *ValkeyClusterOperator) PublishDocker(
 	tag string,
 	ghToken *dagger.Secret,
 ) (string, error) {
+
+	// ensure tag is compliant
+	tag = strings.ReplaceAll(tag, "/", "-")
+
 	// container registry for the multi-platform image
 	imageRepo := "ghcr.io/" + GITHUB_ORG + "/valkey-cluster-operator:" + tag
 
