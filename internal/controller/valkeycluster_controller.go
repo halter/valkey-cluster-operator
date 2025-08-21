@@ -215,7 +215,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	valkeyConfHash, err := r.upsertConfigMap(ctx, valkeyCluster)
+	// We may add the option to force a restart in future using the hash of the updated valkey config
+	_, err = r.upsertConfigMap(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to upsert configmap")
 		return ctrl.Result{}, err
@@ -234,7 +235,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err != nil && apierrors.IsNotFound(err) {
 			log.Info(fmt.Sprintf("StatefulSet %s not found", stsName))
 			// Define a new statefulset
-			sts := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster, valkeyConfHash)
+			sts := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
 			// Set the ownerRef for the StatefulSet
 			// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
 			if err := ctrl.SetControllerReference(valkeyCluster, sts, r.Scheme); err != nil {
@@ -283,7 +284,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Command
 		// Lifecycle
 		// Env
-		desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster, valkeyConfHash)
+		desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
 		if !(cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) &&
 			cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) &&
 			cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)) {
@@ -334,22 +335,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				fmt.Sprintf("StatefulSet Containers are updated for %s/%s", found.Namespace, found.Name))
 
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		foundHash, ok := found.Spec.Template.Annotations[valkeyConfigAnnotation]
-		if !ok || foundHash != valkeyConfHash {
-			log.Info(fmt.Sprintf("Stateful pods need to change from config hash %s to %s", foundHash, valkeyConfHash))
-			found.Spec.Template.Annotations[valkeyConfigAnnotation] = valkeyConfHash
-			if err := r.Update(ctx, found); err != nil {
-				log.Error(err, "Failed to update ValkeyCluster config hash annotation")
-				return ctrl.Result{}, err
-			}
-			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-				fmt.Sprintf("StatefulSet config hash annotation %s/%s is updated", found.Namespace, found.Name))
-
-			log.Info("StatefulSet config hash annotation updated")
-
-			return ctrl.Result{Requeue: true}, nil
 		}
 
 		// We can simply change the number of replicas inside the shard as that has no impact on data availabilty
@@ -1359,7 +1344,7 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 }
 
 // statefulSet returns a ValkeyCluster StatefulSet object
-func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyCluster *cachev1alpha1.ValkeyCluster, valkeyConfHash string) *appsv1.StatefulSet {
+func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyCluster *cachev1alpha1.ValkeyCluster) *appsv1.StatefulSet {
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
 	ls["statefulset.kubernetes.io/sts-name"] = name
 
@@ -1404,9 +1389,8 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: ls,
 					Annotations: map[string]string{
-						"prometheus.io/port":   "9121",
-						"prometheus.io/path":   "/metrics",
-						valkeyConfigAnnotation: valkeyConfHash,
+						"prometheus.io/port": "9121",
+						"prometheus.io/path": "/metrics",
 					},
 				},
 				Spec: corev1.PodSpec{

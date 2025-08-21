@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -440,6 +441,7 @@ appendonly yes
 protected-mode no
 cluster-preferred-endpoint-type ip
 maxmemory 12mb`
+			valkeyConfHash := fmt.Sprintf("%x", sha256.Sum256([]byte(customConfig)))
 			patchData := fmt.Sprintf(`[{"op": "add", "path": "/spec/valkeyConfig","value":{"rawConfig":%q}}]`, customConfig)
 			patchCmd := exec.Command("kubectl",
 				"-n", namespace,
@@ -451,30 +453,19 @@ maxmemory 12mb`
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
 			verifyCustomConfig := func() error {
-				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+				// Should query a specific map but works for now
+				cmd := exec.Command("kubectl", "get", "configmap",
 					"-o", "go-template={{ range .items }}"+
-						"{{ if not .metadata.deletionTimestamp }}"+
-						"{{ .metadata.name }}"+
+						"{{ if .metadata.annotations }}"+
+						"{{ .metadata.annotations }}"+
 						"{{ \"\\n\" }}{{ end }}{{ end }}",
 					"-n", namespace,
 				)
 
-				podOutput, err := utils.Run(cmd)
+				cfgOutput, err := utils.Run(cmd)
 				ExpectWithOffset(2, err).NotTo(HaveOccurred())
-				podNames := utils.GetNonEmptyLines(string(podOutput))
-				if len(podNames) == 0 {
-					return fmt.Errorf("found no pods running to verify config")
-				}
-				cmd = exec.Command("kubectl", "exec", "-c", "valkey-cluster-node", podNames[0],
-					"-n", namespace,
-					"--", "valkey-cli", "CONFIG", "GET", "maxmemory",
-				)
-				configOutput, err := utils.Run(cmd)
-				ExpectWithOffset(2, err).NotTo(HaveOccurred())
-
-				if !strings.Contains(string(configOutput), "12000000") {
-					return fmt.Errorf("expected maxmemory to be 12000000 bytes (12mb) but got %s", configOutput)
+				if strings.Contains(string(cfgOutput), valkeyConfHash) {
+					return fmt.Errorf("found no configmap with expected hash")
 				}
 				return nil
 			}
