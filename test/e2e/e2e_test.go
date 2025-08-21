@@ -431,6 +431,55 @@ var _ = Describe("controller", Ordered, func() {
 			}
 			EventuallyWithOffset(1, verifyPVCResources, 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
+		It("apply custom rawConfig", func() {
+			customConfig := `port 6379
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 5000
+appendonly yes
+protected-mode no
+cluster-preferred-endpoint-type ip
+maxmemory 12mb`
+			patchData := fmt.Sprintf(`[{"op": "add", "path": "/spec/valkeyConfig","value":{"rawConfig":%q}}]`, customConfig)
+			patchCmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				"-p", patchData,
+			)
+			_, err := utils.Run(patchCmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 1), 3*time.Minute, 15*time.Second).Should(Succeed())
+			verifyCustomConfig := func() error {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+					"-o", "go-template={{ range .items }}"+
+						"{{ if not .metadata.deletionTimestamp }}"+
+						"{{ .metadata.name }}"+
+						"{{ \"\\n\" }}{{ end }}{{ end }}",
+					"-n", namespace,
+				)
+
+				podOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				podNames := utils.GetNonEmptyLines(string(podOutput))
+				if len(podNames) == 0 {
+					return fmt.Errorf("found no pods running to verify config")
+				}
+				cmd = exec.Command("kubectl", "exec", podNames[0],
+					"-n", namespace,
+					"--", "valkey-cli", "CONFIG", "GET", "maxmemory",
+				)
+				configOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+
+				if !strings.Contains(string(configOutput), "12000000") {
+					return fmt.Errorf("expected maxmemory to be 12000000 bytes (12mb) but got %s", configOutput)
+				}
+				return nil
+			}
+			Eventually(verifyCustomConfig, time.Minute, time.Second).Should(Succeed())
+		})
 		It("recover from all pods being deleted", func() {
 			cmd := exec.Command("kubectl", "get", "pods",
 				"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),

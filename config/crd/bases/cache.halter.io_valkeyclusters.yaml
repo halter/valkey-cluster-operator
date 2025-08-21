@@ -372,6 +372,14 @@ spec:
                       type: string
                   type: object
                 type: array
+              valkeyConfig:
+                description: Overwrite the default operator-provided configuration
+                  with user-defined config
+                properties:
+                  rawConfig:
+                    description: Raw valkey.conf content provided as a string
+                    type: string
+                type: object
             type: object
           status:
             description: ValkeyClusterStatus defines the observed state of ValkeyCluster
