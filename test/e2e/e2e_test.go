@@ -466,7 +466,7 @@ maxmemory 12mb`
 				if len(podNames) == 0 {
 					return fmt.Errorf("found no pods running to verify config")
 				}
-				cmd = exec.Command("kubectl", "exec", podNames[0],
+				cmd = exec.Command("kubectl", "exec", "-c", "valkey-cluster-node", podNames[0],
 					"-n", namespace,
 					"--", "valkey-cli", "CONFIG", "GET", "maxmemory",
 				)
