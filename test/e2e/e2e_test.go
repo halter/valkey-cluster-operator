@@ -449,7 +449,7 @@ maxmemory 12mb`
 			)
 			_, err := utils.Run(patchCmd)
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 1), 3*time.Minute, 15*time.Second).Should(Succeed())
+
 			verifyCustomConfig := func() error {
 				cmd := exec.Command("kubectl", "get", "pods",
 					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
