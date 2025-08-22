@@ -455,17 +455,17 @@ maxmemory 12mb`
 			verifyCustomConfig := func() error {
 				// Should query a specific map but works for now
 				cmd := exec.Command("kubectl", "get", "configmap",
+					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
 					"-o", "go-template={{ range .items }}"+
-						"{{ if .metadata.annotations }}"+
-						"{{ .metadata.annotations }}"+
-						"{{ \"\\n\" }}{{ end }}{{ end }}",
+						"{{index .data \"valkey.conf\"}}"+
+						"{{ end }}",
 					"-n", namespace,
 				)
 
 				cfgOutput, err := utils.Run(cmd)
 				ExpectWithOffset(2, err).NotTo(HaveOccurred())
-				if strings.Contains(string(cfgOutput), valkeyConfHash) {
-					return fmt.Errorf("found no configmap with expected hash")
+				if strings.Compare(string(cfgOutput), valkeyConfHash) == 0 {
+					return fmt.Errorf("expected configmap to be updated")
 				}
 				return nil
 			}
