@@ -65,6 +65,8 @@ func (m *ValkeyClusterOperator) BuildManager(
 
 	builder := dag.Container().
 		From("golang:1.24").
+		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod-124-"+string(platform))).
+		WithMountedCache("/go/build-cache", dag.CacheVolume("go-build-124-"+string(platform))).
 		WithWorkdir("/workspace").
 		WithFile("/workspace/go.mod", source.File("go.mod")).
 		WithFile("/workspace/go.sum", source.File("go.sum")).
@@ -74,9 +76,7 @@ func (m *ValkeyClusterOperator) BuildManager(
 		WithEnvVariable("CGO_ENABLED", "0").
 		WithEnvVariable("GOOS", goos).
 		WithEnvVariable("GOARCH", goarch).
-		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod-124-"+string(platform))).
 		WithEnvVariable("GOMODCACHE", "/go/pkg/mod").
-		WithMountedCache("/go/build-cache", dag.CacheVolume("go-build-124-"+string(platform))).
 		WithEnvVariable("GOCACHE", "/go/build-cache").
 		WithExec([]string{"go", "mod", "download"}).
 		WithExec([]string{"go", "build", "-o", "manager", "cmd/main.go"})
@@ -124,7 +124,7 @@ func (m *ValkeyClusterOperator) PublishValkeyDocker(
 	ghToken *dagger.Secret,
 ) error {
 
-	valkeyVersions := []string{"8.0.2", "8.1.3"}
+	valkeyVersions := []string{"8.0.3", "8.0.4", "8.0.5", "8.1.3"}
 
 	for _, valkeyVersion := range valkeyVersions {
 		// container registry for the multi-platform image
@@ -185,8 +185,7 @@ func (m *ValkeyClusterOperator) BuildValkeyContainerImage(
 	for _, platform := range platforms {
 		opts := dagger.ContainerOpts{Platform: platform}
 		valkey := dag.Container(opts).
-			// TODO: replace with https://hub.docker.com/r/valkey/valkey/tags as bitnami are going to move everything to a paid model
-			From("bitnami/valkey:" + valkeyVersion)
+			From("valkey/valkey:" + valkeyVersion)
 		platformVariants = append(platformVariants, valkey)
 	}
 	return platformVariants, nil
@@ -551,6 +550,10 @@ func (m *ValkeyClusterOperator) CreateTerraform(
 func YamlToTf(ctx context.Context, yamlStr string) (string, error) {
 	ctr := dag.Container().
 		From("golang:1.24").
+		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod-124-yamltotf")).
+		WithMountedCache("/go/build-cache", dag.CacheVolume("go-build-124-yamltotf")).
+		WithEnvVariable("GOMODCACHE", "/go/pkg/mod").
+		WithEnvVariable("GOCACHE", "/go/build-cache").
 		WithExec([]string{"go", "install", "github.com/jrhouston/tfk8s@latest"}).
 		WithExec([]string{"sh", "-c", "git clone https://github.com/sl1pm4t/k2tf.git && cd k2tf && go install && cd .. && rm -rf k2tf"})
 
@@ -626,4 +629,22 @@ func YamlToTf(ctx context.Context, yamlStr string) (string, error) {
 		WithExec([]string{"terraform", "fmt"}).
 		File("/workspace/install.tf").
 		Contents(ctx)
+}
+
+func (m *ValkeyClusterOperator) RenderTerraform(
+	ctx context.Context,
+	// +defaultPath="/"
+	source *dagger.Directory,
+) (string, error) {
+
+	versionName := "abc"
+	manifestDir := m.BuildManifests(ctx, source, versionName)
+
+	tf, err := m.CreateTerraform(ctx, manifestDir.File("install.yaml"))
+	if err != nil {
+		return "", err
+	}
+
+	return tf, nil
+
 }
