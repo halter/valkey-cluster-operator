@@ -373,14 +373,14 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 
 	container := dag.Container().
 		From("golang:1.24").
-		WithUnixSocket("/var/run/docker.sock", sock).
+		WithMountedCache("/root/.cache/go-build", goCache).
+		WithMountedCache("/root/go/pkg/mod", goModCache).
 		WithExec([]string{"apt", "update"}).
 		WithExec([]string{"apt", "install", "-y", "docker.io", "jq"}).
 		WithExec([]string{"curl", "-L", "-o", "/usr/local/bin/kubectl", "https://dl.k8s.io/release/" + kubectlRelease + "/bin/linux/amd64/kubectl"}).
 		WithExec([]string{"chmod", "+x", "/usr/local/bin/kubectl"}).
-		WithMountedCache("/root/.cache/go-build", goCache).
-		WithMountedCache("/root/go/pkg/mod", goModCache).
 		WithExec([]string{"go", "install", "sigs.k8s.io/kind@v0.29.0"}).
+		WithUnixSocket("/var/run/docker.sock", sock).
 		WithEnvVariable("CACHEBUSTER", time.Now().String()).
 		WithExec([]string{"kind", "create", "cluster"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
