@@ -7,12 +7,12 @@
 # node hostname to a coreDNS record causes some trouble for clients that don't
 # respect cluster-preferred-endpoint-type when connection from outside kubernetes
 
-msg post_start begin
+msg bg_meet begin
 
 awk -F, '/nodename=/ && !/myself/ { split($5, arr, "="); print arr[2] }' nodes.conf | while IFS= read -r host; do
-	sh /scripts/meet.sh "$host" $((5 + $RANDOM % 20)) &
+	sh /scripts/meet.sh "$host" &
 done
 
 wait
 
-msg post_start end
+msg bg_meet end
