@@ -2,7 +2,7 @@
 
 . /scripts/utils.sh
 
-SCRIPT_TIMEOUT=15
+SCRIPT_TIMEOUT=20
 start_time=$(date +%s)
 end_time=$((start_time + SCRIPT_TIMEOUT))
 

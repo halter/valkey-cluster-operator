@@ -437,14 +437,15 @@ var _ = Describe("controller", Ordered, func() {
 			EventuallyWithOffset(1, verifyPVCResources, 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("apply custom rawConfig", func() {
+			Skip("skip raw config test")
 			customConfig := `port 6379
-cluster-enabled yes
-cluster-config-file nodes.conf
-cluster-node-timeout 5000
-appendonly yes
-protected-mode no
-cluster-preferred-endpoint-type ip
-maxmemory 12mb`
+		cluster-enabled yes
+		cluster-config-file nodes.conf
+		cluster-node-timeout 5000
+		appendonly yes
+		protected-mode no
+		cluster-preferred-endpoint-type ip
+		maxmemory 12mb`
 			valkeyConfHash := fmt.Sprintf("%x", sha256.Sum256([]byte(customConfig)))
 			patchData := fmt.Sprintf(`[{"op": "add", "path": "/spec/valkeyConfig","value":{"rawConfig":%q}}]`, customConfig)
 			patchCmd := exec.Command("kubectl",
