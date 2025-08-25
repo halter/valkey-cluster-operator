@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -430,6 +431,45 @@ var _ = Describe("controller", Ordered, func() {
 				return nil
 			}
 			EventuallyWithOffset(1, verifyPVCResources, 3*time.Minute, 15*time.Second).Should(Succeed())
+		})
+		It("apply custom rawConfig", func() {
+			customConfig := `port 6379
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 5000
+appendonly yes
+protected-mode no
+cluster-preferred-endpoint-type ip
+maxmemory 12mb`
+			valkeyConfHash := fmt.Sprintf("%x", sha256.Sum256([]byte(customConfig)))
+			patchData := fmt.Sprintf(`[{"op": "add", "path": "/spec/valkeyConfig","value":{"rawConfig":%q}}]`, customConfig)
+			patchCmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				"-p", patchData,
+			)
+			_, err := utils.Run(patchCmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+			verifyCustomConfig := func() error {
+				// Should query a specific map but works for now
+				cmd := exec.Command("kubectl", "get", "configmap",
+					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+					"-o", "go-template={{ range .items }}"+
+						"{{index .data \"valkey.conf\"}}"+
+						"{{ end }}",
+					"-n", namespace,
+				)
+
+				cfgOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				if strings.Compare(string(cfgOutput), valkeyConfHash) == 0 {
+					return fmt.Errorf("expected configmap to be updated")
+				}
+				return nil
+			}
+			Eventually(verifyCustomConfig, time.Minute, time.Second).Should(Succeed())
 		})
 		It("recover from all pods being deleted", func() {
 			cmd := exec.Command("kubectl", "get", "pods",

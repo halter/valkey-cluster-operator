@@ -73,6 +73,15 @@ type ValkeyClusterSpec struct {
 	// Topology keys to use in StatefulSet Pod antiaffinity used to ensure that pods in a shard are run on separate hosts or separate availability zones
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	AntiAffinityTopologyKeys []string `json:"antiAffinityTopologyKeys,omitempty"`
+
+	// Overwrite the default operator-provided configuration with user-defined config
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	ValkeyConfig *ValkeyConfig `json:"valkeyConfig,omitempty"`
+}
+
+type ValkeyConfig struct {
+	// Raw valkey.conf content provided as a string
+	RawConfig string `json:"rawConfig,omitempty"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster

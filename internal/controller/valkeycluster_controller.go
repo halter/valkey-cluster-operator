@@ -19,6 +19,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"os"
@@ -59,6 +60,7 @@ import (
 var scripts embed.FS
 
 const valkeyClusterFinalizer = "cache.halter.io/finalizer"
+const valkeyConfigAnnotation = "cache.halter.io/config-hash"
 
 // Definitions to manage status conditions
 const (
@@ -213,7 +215,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	err = r.upsertConfigMap(ctx, valkeyCluster)
+	// We may add the option to force a restart in future using the hash of the updated valkey config
+	_, err = r.upsertConfigMap(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to upsert configmap")
 		return ctrl.Result{}, err
@@ -1598,40 +1601,47 @@ func imageForValkeyCluster() (string, error) {
 	return image, nil
 }
 
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) error {
+func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (string, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("upserting configmap")
+
+	// TODO: Sanity check user-provided valkey.conf
 
 	preStop, err := scripts.ReadFile("scripts/pre_stop.sh")
 	if err != nil {
 		logger.Error(err, "failed to read pre_stop.sh")
-		return err
+		return "", err
 	}
 	postStart, err := scripts.ReadFile("scripts/post_start.sh")
 	if err != nil {
 		logger.Error(err, "failed to read post_start.sh")
-		return err
-	}
-	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
-	if err != nil {
-		logger.Error(err, "failed to read valkey.conf")
-		return err
+		return "", err
 	}
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
+	cmData := map[string]string{
+		"pre_stop.sh":   string(preStop),
+		"post_start.sh": string(postStart),
+	}
+	valkeyConfContent, err := getValkeyConfigContent(valkeyCluster)
+	if err != nil {
+		return "", fmt.Errorf("failed to read valkey config content: %v", err)
+	}
+	valkeyConfHash := fmt.Sprintf("%x", sha256.Sum256([]byte(valkeyConfContent)))
+	cmData["valkey.conf"] = valkeyConfContent
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyCluster.Name,
 			Namespace: valkeyCluster.Namespace,
 			Labels:    ls,
+			Annotations: map[string]string{
+				// Used to confirm what pods are running what configmaps. Does not influence reconcilation.
+				valkeyConfigAnnotation: valkeyConfHash,
+			},
 		},
-		Data: map[string]string{
-			"pre_stop.sh":   string(preStop),
-			"post_start.sh": string(postStart),
-			"valkey.conf":   string(valkeyConf),
-		},
+		Data: cmData,
 	}
 	if err := controllerutil.SetControllerReference(valkeyCluster, cm, r.Scheme); err != nil {
-		return err
+		return "", err
 	}
 	if err := r.Create(ctx, cm); err != nil {
 		if errors.IsAlreadyExists(err) {
@@ -1652,19 +1662,31 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 			if needsUpdate {
 				if err := r.Update(ctx, cm); err != nil {
 					logger.Error(err, "failed to update ConfigMap")
-					return err
+					return "", err
 				}
-				logger.Info("configmap updated")
+				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
+					fmt.Sprintf("ConfigMap %s/%s is updated", valkeyCluster.Namespace, valkeyCluster.Name))
 			}
 		} else {
 			logger.Error(err, "failed to create ConfigMap")
-			return err
+			return "", err
 		}
 	} else {
 		r.Recorder.Event(valkeyCluster, "Normal", "Created",
 			fmt.Sprintf("ConfigMap %s/%s is created", valkeyCluster.Namespace, valkeyCluster.Name))
 	}
-	return nil
+	return valkeyConfHash, nil
+}
+
+func getValkeyConfigContent(valkeyCluster *cachev1alpha1.ValkeyCluster) (string, error) {
+	if valkeyCluster.Spec.ValkeyConfig != nil && valkeyCluster.Spec.ValkeyConfig.RawConfig != "" {
+		return valkeyCluster.Spec.ValkeyConfig.RawConfig, nil
+	}
+	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
+	if err != nil {
+		return "", err
+	}
+	return string(valkeyConf), nil
 }
 
 func statefulSetSize(valkeyCluster *cachev1alpha1.ValkeyCluster) int32 {
