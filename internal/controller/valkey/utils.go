@@ -3,9 +3,11 @@ package valkey
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
 )
@@ -327,4 +329,16 @@ func GenerateReshardingPlan(clusterNodesForShard map[int][]*ClusterNode, desired
 	})
 
 	return actionPlan, nil
+}
+
+func TcpCheck(host, port string) bool {
+	// check tcp port
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	if conn != nil {
+		defer conn.Close()
+	}
+	return true
 }

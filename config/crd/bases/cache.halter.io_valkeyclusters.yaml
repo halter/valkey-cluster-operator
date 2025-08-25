@@ -66,6 +66,9 @@ spec:
                   type: string
                 description: Node selector
                 type: object
+              password:
+                description: Enable password authentication
+                type: string
               replicas:
                 description: Replicas defines the number of replicas per shard in
                   the cluster

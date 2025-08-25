@@ -17,9 +17,7 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"embed"
 	"fmt"
 	"os"
@@ -30,22 +28,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -53,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
+	"github.com/halter/valkey-cluster-operator/internal/controller/valkey"
 	internalValkey "github.com/halter/valkey-cluster-operator/internal/controller/valkey"
 )
 
@@ -61,6 +54,9 @@ var scripts embed.FS
 
 const valkeyClusterFinalizer = "cache.halter.io/finalizer"
 const valkeyConfigAnnotation = "cache.halter.io/config-hash"
+
+const VALKEY_PORT int = 6379
+const VALKEY_BUS_PORT int = 16379
 
 // Definitions to manage status conditions
 const (
@@ -228,286 +224,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// Check if the statefulset already exists, if not create a new one
-	for stsIdx := 0; stsIdx < int(valkeyCluster.Spec.Shards); stsIdx++ {
-		stsName := fmt.Sprintf("%s-%d", valkeyCluster.Name, stsIdx)
-		found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-		if err != nil && apierrors.IsNotFound(err) {
-			log.Info(fmt.Sprintf("StatefulSet %s not found", stsName))
-			// Define a new statefulset
-			sts := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
-			// Set the ownerRef for the StatefulSet
-			// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
-			if err := ctrl.SetControllerReference(valkeyCluster, sts, r.Scheme); err != nil {
-				log.Error(err, "Failed to define new StatefulSet resource for ValkeyCluster")
-
-				// The following implementation will update the status
-				meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
-					Status: metav1.ConditionFalse, Reason: "Reconciling",
-					Message: fmt.Sprintf("Failed to create StatefulSet for the custom resource (%s): (%s)", valkeyCluster.Name, err)})
-
-				if err := r.Status().Update(ctx, valkeyCluster); err != nil {
-					log.Error(err, "Failed to update ValkeyCluster status")
-					return ctrl.Result{}, err
-				}
-
-				return ctrl.Result{}, err
-			}
-
-			log.Info("Creating a new StatefulSet",
-				"StatefulSet.Namespace", sts.Namespace, "StatefulSet.Name", sts.Name)
-			if err = r.Create(ctx, sts); err != nil {
-				log.Error(err, "Failed to create new StatefulSet",
-					"StatefulSet.Namespace", sts.Namespace, "StatefulSet.Name", sts.Name)
-				return ctrl.Result{}, err
-			}
-			r.Recorder.Event(valkeyCluster, "Normal", "Created",
-				fmt.Sprintf("StatefulSet %s/%s is created", valkeyCluster.Namespace, sts.Name))
-
-			// StatefulSet created successfully
-			// We will requeue the reconciliation so that we can ensure the state
-			// and move forward for the next operations
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		} else if err != nil {
-			log.Error(err, "Failed to get StatefulSet")
-			// Let's return the error for the reconciliation be re-trigged again
-			return ctrl.Result{}, err
-		}
-
-		// check if any update is occuring for stateful set, if so re-schedule reconcile
-		if found.Status.CurrentRevision != found.Status.UpdateRevision {
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		// update containers[0].Command if there is a difference
-		// Update if there is a difference in the following attributes:
-		// Command
-		// Lifecycle
-		// Env
-		desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
-		if !(cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) &&
-			cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) &&
-			cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)) {
-
-			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) {
-				log.Info(fmt.Sprintf("StatefulSet %s Command is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command)))
-			}
-			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle) {
-				log.Info(fmt.Sprintf("StatefulSet %s Lifecycle is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Lifecycle, desired.Spec.Template.Spec.Containers[0].Lifecycle)))
-			}
-			if !cmp.Equal(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env) {
-				log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(found.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
-			}
-
-			found := &appsv1.StatefulSet{}
-			err = r.Get(ctx, types.NamespacedName{Name: stsName, Namespace: valkeyCluster.Namespace}, found)
-			if err != nil {
-				log.Error(err, "Failed to get StatefulSet")
-				// Let's return the error for the reconciliation be re-trigged again
-				return ctrl.Result{}, err
-			}
-			found.Spec.Template.Spec.Containers[0].Command = desired.Spec.Template.Spec.Containers[0].Command
-			found.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
-			found.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
-
-			if err = r.Update(ctx, found); err != nil {
-				log.Error(err, "Failed to update StatefulSet",
-					"StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
-
-				if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
-					log.Error(err, "Failed to re-fetch valkeyCluster")
-					return ctrl.Result{}, err
-				}
-
-				meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
-					Status: metav1.ConditionFalse, Reason: "Reconciling",
-					Message: fmt.Sprintf("Failed to update StatefulSet containers (%s): (%s)", valkeyCluster.Name, err)})
-
-				if err := r.Status().Update(ctx, valkeyCluster); err != nil {
-					log.Error(err, "Failed to update ValkeyCluster status")
-					return ctrl.Result{}, err
-				}
-
-				return ctrl.Result{}, err
-			}
-
-			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-				fmt.Sprintf("StatefulSet Containers are updated for %s/%s", found.Namespace, found.Name))
-
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		// We can simply change the number of replicas inside the shard as that has no impact on data availabilty
-		if *found.Spec.Replicas != (statefulSetSize(valkeyCluster)) && *found.Spec.Replicas < (statefulSetSize(valkeyCluster)) {
-			log.Info(fmt.Sprintf("StatefulSet needs to increase replicas from %d to %d", *found.Spec.Replicas, (valkeyCluster.Spec.Shards + valkeyCluster.Spec.Replicas)))
-			found.Spec.Replicas = &[]int32{(statefulSetSize(valkeyCluster))}[0]
-			if err = r.Update(ctx, found); err != nil {
-				log.Error(err, "Failed to update StatefulSet",
-					"StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
-
-				// Re-fetch the valkeyCluster Custom Resource before updating the status
-				// so that we have the latest state of the resource on the cluster and we will avoid
-				// raising the error "the object has been modified, please apply
-				// your changes to the latest version and try again" which would re-trigger the reconciliation
-				if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
-					log.Error(err, "Failed to re-fetch valkeyCluster")
-					return ctrl.Result{}, err
-				}
-
-				// The following implementation will update the status
-				meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
-					Status: metav1.ConditionFalse, Reason: "Resizing",
-					Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", valkeyCluster.Name, err)})
-
-				if err := r.Status().Update(ctx, valkeyCluster); err != nil {
-					log.Error(err, "Failed to update ValkeyCluster status")
-					return ctrl.Result{}, err
-				}
-
-				return ctrl.Result{}, err
-			}
-
-			log.Info("StatefulSet replicas updated")
-
-			// Now, that we update the size we want to requeue the reconciliation
-			// so that we can ensure that we have the latest state of the resource before
-			// update. Also, it will help ensure the desired state on the cluster
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		foundResources := found.Spec.Template.Spec.Containers[0].Resources
-		log.Info(fmt.Sprintf("StatefulSet resources: %v", foundResources))
-
-		foundRequests := foundResources.Requests
-		if foundRequests == nil {
-			found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-			if err != nil {
-				log.Error(err, "Failed to find sts by index")
-				return ctrl.Result{}, err
-			}
-			found.Spec.Template.Spec.Containers[0].Resources.Requests = valkeyCluster.Spec.Resources.Requests
-			err = r.Update(ctx, found)
-			if err != nil {
-				log.Error(err, "Failed to update ValkeyCluster resource requests")
-				return ctrl.Result{}, err
-			}
-			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-				fmt.Sprintf("StatefulSet resources requests %s/%s is updated", found.Namespace, found.Name))
-			return ctrl.Result{Requeue: true}, nil
-		} else {
-			// scaling up
-			if foundRequests.Cpu().Cmp(*valkeyCluster.Spec.Resources.Requests.Cpu()) == -1 {
-				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-				if err != nil {
-					log.Error(err, "Failed to find sts by index")
-					return ctrl.Result{}, err
-				}
-				found.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = *valkeyCluster.Spec.Resources.Requests.Cpu()
-				err = r.Update(ctx, found)
-				if err != nil {
-					log.Error(err, "Failed to update ValkeyCluster resources")
-					return ctrl.Result{}, err
-				}
-				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-					fmt.Sprintf("StatefulSet CPU requests %s/%s is updated", found.Namespace, found.Name))
-				return ctrl.Result{Requeue: true}, nil
-			}
-			// scaling up
-			if foundRequests.Memory().Cmp(*valkeyCluster.Spec.Resources.Requests.Memory()) == -1 {
-				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-				if err != nil {
-					log.Error(err, "Failed to find sts by index")
-					return ctrl.Result{}, err
-				}
-				found.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = *valkeyCluster.Spec.Resources.Requests.Memory()
-				err = r.Update(ctx, found)
-				if err != nil {
-					log.Error(err, "Failed to update ValkeyCluster resources")
-					return ctrl.Result{}, err
-				}
-				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-					fmt.Sprintf("StatefulSet Memory requests %s/%s is updated", found.Namespace, found.Name))
-				return ctrl.Result{Requeue: true}, nil
-			}
-		}
-
-		if found.Spec.MinReadySeconds != valkeyCluster.Spec.MinReadySeconds {
-			found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-			if err != nil {
-				log.Error(err, "Failed to find sts by index")
-				return ctrl.Result{}, err
-			}
-			log.Info(fmt.Sprintf("StatefulSet needs to change minReadySeconds from %d to %d", found.Spec.MinReadySeconds, valkeyCluster.Spec.MinReadySeconds))
-			found.Spec.MinReadySeconds = valkeyCluster.Spec.MinReadySeconds
-			if err := r.Update(ctx, found); err != nil {
-				log.Error(err, "Failed to update ValkeyCluster minReadySeconds")
-				return ctrl.Result{}, err
-			}
-			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-				fmt.Sprintf("StatefulSet MinReadySeconds %s/%s is updated", found.Namespace, found.Name))
-
-			log.Info("StatefulSet minReadySeconds updated")
-
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		foundLimits := foundResources.Limits
-		if foundLimits == nil {
-			found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-			if err != nil {
-				log.Error(err, "Failed to find sts by index")
-				return ctrl.Result{}, err
-			}
-			found.Spec.Template.Spec.Containers[0].Resources.Limits = valkeyCluster.Spec.Resources.Limits
-			err = r.Update(ctx, found)
-			if err != nil {
-				log.Error(err, "Failed to update ValkeyCluster resource limits")
-				return ctrl.Result{}, err
-			}
-			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-				fmt.Sprintf("StatefulSet resources limits %s/%s is updated", found.Namespace, found.Name))
-			return ctrl.Result{Requeue: true}, nil
-		} else {
-			// scaling up
-			if foundLimits.Cpu().Cmp(*valkeyCluster.Spec.Resources.Limits.Cpu()) == -1 {
-				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-				if err != nil {
-					log.Error(err, "Failed to find sts by index")
-					return ctrl.Result{}, err
-				}
-				found.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = *valkeyCluster.Spec.Resources.Limits.Cpu()
-				err = r.Update(ctx, found)
-				if err != nil {
-					log.Error(err, "Failed to update ValkeyCluster resources")
-					return ctrl.Result{}, err
-				}
-				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-					fmt.Sprintf("StatefulSet CPU limits %s/%s is updated", found.Namespace, found.Name))
-				return ctrl.Result{Requeue: true}, nil
-			}
-			// scaling up
-			if foundLimits.Memory().Cmp(*valkeyCluster.Spec.Resources.Limits.Memory()) == -1 {
-				found, err := r.findStatefulsetByIndex(ctx, valkeyCluster, stsIdx)
-				if err != nil {
-					log.Error(err, "Failed to find sts by index")
-					return ctrl.Result{}, err
-				}
-				found.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = *valkeyCluster.Spec.Resources.Limits.Memory()
-				err = r.Update(ctx, found)
-				if err != nil {
-					log.Error(err, "Failed to update ValkeyCluster resources")
-					return ctrl.Result{}, err
-				}
-				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-					fmt.Sprintf("StatefulSet Memory limits %s/%s is updated", found.Namespace, found.Name))
-				return ctrl.Result{Requeue: true}, nil
-			}
-		}
-
+	res, err := r.reconcileStatefulSets(ctx, req, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile statefulsets")
+		return *res, err
 	}
 
 	// wait for all pods to be running and accessible via valkey-client
-	res, err := r.waitForPodsToBeAccessibleViaValkey(ctx, valkeyCluster)
+	res, err = r.waitForPodsToBeAccessibleViaValkey(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to list pods", "ValkeyCluster.Namespace", valkeyCluster.Namespace, "ValkeyCluster.Name", valkeyCluster.Name)
 		return ctrl.Result{}, err
@@ -567,7 +291,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			// first we need to delete all node from cluster
 			for _, cn := range clusterNodesInLastSts {
 				log.Info(fmt.Sprintf("Removing %s from %s/%s", cn.ID, valkeyCluster.Namespace, valkeyCluster.Name))
-				_, _, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "del-node", "127.0.0.1:6379", cn.ID})
+				_, _, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "del-node", fmt.Sprintf("127.0.0.1:%d", VALKEY_PORT), cn.ID})
 				if err != nil {
 					log.Error(err, "Failed to remove cluster node")
 					return ctrl.Result{}, err
@@ -640,7 +364,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	for _, clusterNodeA := range clusterNodes {
 		for _, clusterNodeB := range clusterNodes {
 			if clusterNodeA.Pod != clusterNodeB.Pod {
-				client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{clusterNodeA.IP + ":6379"}, ForceSingleClient: true})
+				client, err := r.NewValkeyClient(ctx, valkeyCluster, clusterNodeA.IP, VALKEY_PORT)
 				if err != nil {
 					log.Error(err, "Failed to create Valkey client")
 					return ctrl.Result{}, err
@@ -667,7 +391,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					continue
 				}
 
-				err = client.Do(ctx, client.B().ClusterMeet().Ip(clusterNodeB.IP).Port(6379).Build()).Error()
+				err = client.Do(ctx, client.B().ClusterMeet().Ip(clusterNodeB.IP).Port(int64(VALKEY_PORT)).Build()).Error()
 				if err != nil {
 					log.Error(err, "Failed to do cluster meet")
 					return ctrl.Result{}, err
@@ -752,7 +476,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 			expectedSlotRanges := slotRanges[shardIdx]
 			log.Info(fmt.Sprintf("Expected slot range %+v for shard %d not found", expectedSlotRanges, shardIdx))
-			client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{clusterNodesForShard[0].IP + ":6379"}, ForceSingleClient: true})
+			client, err := r.NewValkeyClient(ctx, valkeyCluster, clusterNodesForShard[0].IP, VALKEY_PORT)
 			if err != nil {
 				log.Error(err, "Failed to get client")
 				return ctrl.Result{}, err
@@ -792,7 +516,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					if cn.MasterNodeID == primary.ID {
 						continue
 					}
-					client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{cn.IP + ":6379"}, ForceSingleClient: true})
+					client, err := r.NewValkeyClient(ctx, valkeyCluster, cn.IP, VALKEY_PORT)
 					if err != nil {
 						log.Error(err, "Failed to get client")
 						return ctrl.Result{}, err
@@ -823,7 +547,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				if cn.ID == primary.ID {
 					continue
 				}
-				client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{cn.IP + ":6379"}, ForceSingleClient: true})
+				client, err := r.NewValkeyClient(ctx, valkeyCluster, cn.IP, VALKEY_PORT)
 				if err != nil {
 					log.Error(err, "Failed to get client")
 					return ctrl.Result{}, err
@@ -1048,20 +772,25 @@ func (r *ValkeyClusterReconciler) waitForPodsToBeAccessibleViaValkey(ctx context
 			}
 		}
 		if isPodReady {
-			client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{pod.Status.PodIP + ":6379"}, ForceSingleClient: true})
+			// check tcp port
+			if !valkey.TcpCheck(pod.Status.PodIP, fmt.Sprintf("%d", VALKEY_PORT)) {
+				return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			}
+
+			client, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
 			if err != nil {
 				logger.Info("Could not create valkey client, requeing")
-				return &ctrl.Result{RequeueAfter: time.Minute}, nil
+				return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 			defer client.Close()
 			_, err = client.Do(ctx, client.B().ClusterNodes().Build()).ToString()
 			if err != nil {
 				logger.Info("Could not get cluster nodes requeing")
-				return &ctrl.Result{RequeueAfter: time.Minute}, nil
+				return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 		} else {
 			logger.Info("Pod not ready", "Pod.Name", pod.Name)
-			return &ctrl.Result{RequeueAfter: time.Minute}, nil
+			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 	}
 	return nil, nil
@@ -1199,7 +928,7 @@ func (r *ValkeyClusterReconciler) buildClusterNodes(ctx context.Context, valkeyC
 			}
 		}
 		if isPodReady {
-			client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{pod.Status.PodIP + ":6379"}, ForceSingleClient: true})
+			client, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
 			if err != nil {
 				return nil, err
 			}
@@ -1256,324 +985,6 @@ func (r *ValkeyClusterReconciler) doFinalizerOperationsForValkeyCluster(cr *cach
 			cr.Namespace))
 }
 
-// persistentVolumeClaim returns a ValkeyCluster PVC object
-func (r *ValkeyClusterReconciler) persistentVolumeClaim(name string, valkeyCluster *cachev1alpha1.ValkeyCluster) (*corev1.PersistentVolumeClaim, error) {
-	ls := labelsForValkeyCluster(valkeyCluster.Name)
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: valkeyCluster.Namespace,
-			Labels:    ls,
-		},
-		Spec: *valkeyCluster.Spec.Storage,
-	}
-	// Set the ownerRef for the PersistentVolumeClaim
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
-	if err := ctrl.SetControllerReference(valkeyCluster, pvc, r.Scheme); err != nil {
-		return nil, err
-	}
-
-	return pvc, nil
-}
-
-func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) error {
-	logger := log.FromContext(ctx)
-	logger.Info("upserting headless service")
-
-	name := valkeyCluster.Name + "-headless"
-	ls := labelsForValkeyCluster(valkeyCluster.Name)
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: valkeyCluster.Namespace,
-			Labels:    ls,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector:  ls,
-			ClusterIP: "None",
-			Ports: []corev1.ServicePort{
-				{
-					Port:       6379,
-					TargetPort: intstr.FromInt(6379),
-				},
-			},
-		},
-	}
-	if err := controllerutil.SetControllerReference(valkeyCluster, svc, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, svc); err != nil {
-		if errors.IsAlreadyExists(err) {
-			found := &corev1.Service{}
-			if err = r.Get(ctx, types.NamespacedName{Name: name, Namespace: valkeyCluster.Namespace}, found); err != nil {
-				logger.Error(err, "failed to get Service")
-			}
-			needsUpdate := false
-
-			if len(found.Spec.Ports) != len(svc.Spec.Ports) {
-				needsUpdate = true
-			} else {
-				for i, port := range found.Spec.Ports {
-					if port.Port != svc.Spec.Ports[i].Port {
-						needsUpdate = true
-					}
-					if port.TargetPort != svc.Spec.Ports[i].TargetPort {
-						needsUpdate = true
-					}
-				}
-			}
-
-			found.Spec = svc.Spec
-			if needsUpdate {
-				if err := r.Update(ctx, found); err != nil {
-					logger.Error(err, "failed to update Service")
-					return err
-				}
-				logger.Info("Service updated")
-			}
-		} else {
-			logger.Error(err, "failed to create Service")
-			return err
-		}
-	} else {
-		r.Recorder.Event(valkeyCluster, "Normal", "Created",
-			fmt.Sprintf("Service %s/%s is created", valkeyCluster.Namespace, name))
-	}
-	return nil
-
-}
-
-// statefulSet returns a ValkeyCluster StatefulSet object
-func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyCluster *cachev1alpha1.ValkeyCluster) *appsv1.StatefulSet {
-	ls := labelsForValkeyCluster(valkeyCluster.Name)
-	ls["statefulset.kubernetes.io/sts-name"] = name
-
-	affinityTerms := []corev1.WeightedPodAffinityTerm{}
-	for _, topologyKey := range valkeyCluster.Spec.AntiAffinityTopologyKeys {
-		affinityTerms = append(affinityTerms, corev1.WeightedPodAffinityTerm{
-			Weight: 1,
-			PodAffinityTerm: corev1.PodAffinityTerm{
-				LabelSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						"statefulset.kubernetes.io/sts-name": name,
-						"cache/name":                         valkeyCluster.Name,
-					},
-				},
-				TopologyKey: topologyKey,
-			},
-		})
-	}
-	var affinity *corev1.Affinity
-	if len(affinityTerms) > 0 {
-		affinity = &corev1.Affinity{
-			PodAntiAffinity: &corev1.PodAntiAffinity{
-				PreferredDuringSchedulingIgnoredDuringExecution: affinityTerms,
-			},
-		}
-	}
-
-	sts := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: valkeyCluster.Namespace,
-			Labels:    ls,
-		},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: valkeyCluster.Name + "-headless",
-			Replicas:    &size,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: ls,
-			},
-			MinReadySeconds: valkeyCluster.Spec.MinReadySeconds,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: ls,
-					Annotations: map[string]string{
-						"prometheus.io/port": "9121",
-						"prometheus.io/path": "/metrics",
-					},
-				},
-				Spec: corev1.PodSpec{
-					NodeSelector: valkeyCluster.Spec.NodeSelector,
-					Tolerations:  valkeyCluster.Spec.Tolerations,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &[]bool{true}[0],
-						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
-						// If you are looking for to produce solutions to be supported
-						// on lower versions you must remove this option.
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-						FSGroup: &[]int64{1009}[0],
-					},
-					Containers: []corev1.Container{
-						{
-							Image:           valkeyCluster.Spec.Image,
-							Name:            "valkey-cluster-node",
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Resources:       *valkeyCluster.Spec.Resources,
-
-							// Ensure restrictive context for the container
-							// More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
-							SecurityContext: &corev1.SecurityContext{
-								// WARNING: Ensure that the image used defines an UserID in the Dockerfile
-								// otherwise the Pod will not run and will fail with "container has runAsNonRoot and image has non-numeric user"".
-								// If you want your workloads admitted in namespaces enforced with the restricted mode in OpenShift/OKD vendors
-								// then, you MUST ensure that the Dockerfile defines a User ID OR you MUST leave the "RunAsNonRoot" and
-								// "RunAsUser" fields empty.
-								RunAsNonRoot: &[]bool{true}[0],
-								// The valkeyCluster image does not use a non-zero numeric user as the default user.
-								// Due to RunAsNonRoot field being set to true, we need to force the user in the
-								// container to a non-zero numeric user. We do this using the RunAsUser field.
-								// However, if you are looking to provide solution for K8s vendors like OpenShift
-								// be aware that you cannot run under its restricted-v2 SCC if you set this value.
-								RunAsUser:                &[]int64{1001}[0],
-								AllowPrivilegeEscalation: &[]bool{false}[0],
-								Capabilities: &corev1.Capabilities{
-									Drop: []corev1.Capability{
-										"ALL",
-									},
-								},
-							},
-							Ports: []corev1.ContainerPort{
-								{
-									ContainerPort: 6379,
-									Name:          "valkey-tcp",
-								},
-								{
-									ContainerPort: 16379,
-									Name:          "valkey-bus",
-								},
-							},
-							Lifecycle: &corev1.Lifecycle{
-								PreStop: &corev1.LifecycleHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"/bin/sh", "/scripts/pre_stop.sh"},
-									},
-								},
-								PostStart: &corev1.LifecycleHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"/bin/sh", "/scripts/post_start.sh"},
-									},
-								},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt(6379),
-									},
-								},
-							},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt(6379),
-									},
-								},
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name: "POD_IP",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											APIVersion: "v1",
-											FieldPath:  "status.podIP",
-										},
-									},
-								},
-								{
-									Name:  "NODE_HOSTNAME_SUFFIX",
-									Value: "." + valkeyCluster.Name + "-headless." + valkeyCluster.Namespace + ".svc.cluster.local",
-								},
-							},
-							WorkingDir: "/data",
-							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-human-nodename "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}"`},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "valkey-data",
-									MountPath: "/data",
-								},
-								{
-									Name:      "valkey-configmap",
-									MountPath: "/data/valkey.conf",
-									SubPath:   "valkey.conf",
-									ReadOnly:  true,
-								},
-								{
-									Name:      "valkey-configmap",
-									MountPath: "/scripts",
-								},
-							},
-						},
-						{
-							Image:           "quay.io/oliver006/redis_exporter:v1.73.0-alpine",
-							Name:            "valkey-exporter",
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Resources: *&corev1.ResourceRequirements{
-								Limits: map[corev1.ResourceName]resource.Quantity{
-									corev1.ResourceCPU:    resource.MustParse("100m"),
-									corev1.ResourceMemory: resource.MustParse("64Mi"),
-								},
-								Requests: map[corev1.ResourceName]resource.Quantity{
-									corev1.ResourceCPU:    resource.MustParse("100m"),
-									corev1.ResourceMemory: resource.MustParse("64Mi"),
-								},
-							},
-							Ports: []corev1.ContainerPort{
-								{
-									ContainerPort: 9121,
-									Name:          "metrivs",
-								},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt(9121),
-									},
-								},
-							},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt(9121),
-									},
-								},
-							},
-							Args: []string{"-is-cluster"},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "valkey-configmap",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: valkeyCluster.Name,
-									},
-								},
-							},
-						},
-					},
-					Affinity: affinity,
-				},
-			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "valkey-data",
-					Labels: ls,
-				},
-				Spec: corev1.PersistentVolumeClaimSpec{
-					AccessModes:      valkeyCluster.Spec.Storage.AccessModes,
-					StorageClassName: valkeyCluster.Spec.Storage.StorageClassName,
-					Resources:        valkeyCluster.Spec.Storage.Resources,
-				},
-			}},
-		},
-	}
-
-	return sts
-}
-
 // labelsForValkeyCluster returns the labels for selecting the resources
 // More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
 func labelsForValkeyCluster(name string) map[string]string {
@@ -1599,137 +1010,4 @@ func imageForValkeyCluster() (string, error) {
 		return "ghcr.io/halter/valkey-server:8.0.2", nil
 	}
 	return image, nil
-}
-
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (string, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("upserting configmap")
-
-	// TODO: Sanity check user-provided valkey.conf
-
-	preStop, err := scripts.ReadFile("scripts/pre_stop.sh")
-	if err != nil {
-		logger.Error(err, "failed to read pre_stop.sh")
-		return "", err
-	}
-	postStart, err := scripts.ReadFile("scripts/post_start.sh")
-	if err != nil {
-		logger.Error(err, "failed to read post_start.sh")
-		return "", err
-	}
-	ls := labelsForValkeyCluster(valkeyCluster.Name)
-	cmData := map[string]string{
-		"pre_stop.sh":   string(preStop),
-		"post_start.sh": string(postStart),
-	}
-	valkeyConfContent, err := getValkeyConfigContent(valkeyCluster)
-	if err != nil {
-		return "", fmt.Errorf("failed to read valkey config content: %v", err)
-	}
-	valkeyConfHash := fmt.Sprintf("%x", sha256.Sum256([]byte(valkeyConfContent)))
-	cmData["valkey.conf"] = valkeyConfContent
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      valkeyCluster.Name,
-			Namespace: valkeyCluster.Namespace,
-			Labels:    ls,
-			Annotations: map[string]string{
-				// Used to confirm what pods are running what configmaps. Does not influence reconcilation.
-				valkeyConfigAnnotation: valkeyConfHash,
-			},
-		},
-		Data: cmData,
-	}
-	if err := controllerutil.SetControllerReference(valkeyCluster, cm, r.Scheme); err != nil {
-		return "", err
-	}
-	if err := r.Create(ctx, cm); err != nil {
-		if errors.IsAlreadyExists(err) {
-			found := &corev1.ConfigMap{}
-			if err = r.Get(ctx, types.NamespacedName{Name: valkeyCluster.Name, Namespace: valkeyCluster.Namespace}, found); err != nil {
-				logger.Error(err, "failed to get ConfigMap")
-			}
-			needsUpdate := false
-			if len(found.Data) != len(cm.Data) {
-				needsUpdate = true
-			}
-			for k, v := range found.Data {
-				if v != cm.Data[k] {
-					needsUpdate = true
-				}
-			}
-
-			if needsUpdate {
-				if err := r.Update(ctx, cm); err != nil {
-					logger.Error(err, "failed to update ConfigMap")
-					return "", err
-				}
-				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-					fmt.Sprintf("ConfigMap %s/%s is updated", valkeyCluster.Namespace, valkeyCluster.Name))
-			}
-		} else {
-			logger.Error(err, "failed to create ConfigMap")
-			return "", err
-		}
-	} else {
-		r.Recorder.Event(valkeyCluster, "Normal", "Created",
-			fmt.Sprintf("ConfigMap %s/%s is created", valkeyCluster.Namespace, valkeyCluster.Name))
-	}
-	return valkeyConfHash, nil
-}
-
-func getValkeyConfigContent(valkeyCluster *cachev1alpha1.ValkeyCluster) (string, error) {
-	if valkeyCluster.Spec.ValkeyConfig != nil && valkeyCluster.Spec.ValkeyConfig.RawConfig != "" {
-		return valkeyCluster.Spec.ValkeyConfig.RawConfig, nil
-	}
-	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
-	if err != nil {
-		return "", err
-	}
-	return string(valkeyConf), nil
-}
-
-func statefulSetSize(valkeyCluster *cachev1alpha1.ValkeyCluster) int32 {
-	return 1 + valkeyCluster.Spec.Replicas
-}
-
-func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, args []string) (string, string, error) {
-	cmd := []string{
-		"sh",
-		"-c",
-		fmt.Sprintf("valkey-cli %s", strings.Join(args, " ")),
-	}
-
-	podName := fmt.Sprintf("%s-0-0", valkeyCluster.Name)
-
-	req := r.ClientSet.CoreV1().RESTClient().Post().Resource("pods").Name(podName).
-		Namespace(valkeyCluster.Namespace).SubResource("exec")
-	req.VersionedParams(&corev1.PodExecOptions{
-		Container: "valkey-cluster-node",
-		Command:   cmd,
-		Stdin:     false,
-		Stdout:    true,
-		Stderr:    true,
-		TTY:       false,
-	}, runtime.NewParameterCodec(r.Scheme))
-	exec, err := remotecommand.NewSPDYExecutor(r.RestConfig, "POST", req.URL())
-	if err != nil {
-		return "", "", fmt.Errorf("Failed to execute valkey-cli %s: %v", strings.Join(args, " "), err)
-	}
-	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("Failed executing command 'valkey-cli %s': stdout: %s, stderr: %s, err: %v", strings.Join(args, " "), stdout.String(), stderr.String(), err)
-	}
-	return stdout.String(), stderr.String(), nil
-}
-
-func (r *ValkeyClusterReconciler) findStatefulsetByIndex(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, idx int) (*appsv1.StatefulSet, error) {
-	found := &appsv1.StatefulSet{}
-	stsName := fmt.Sprintf("%s-%d", valkeyCluster.Name, idx)
-	err := r.Get(ctx, types.NamespacedName{Name: stsName, Namespace: valkeyCluster.Namespace}, found)
-	return found, err
 }
