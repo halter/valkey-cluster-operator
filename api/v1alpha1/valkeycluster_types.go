@@ -77,6 +77,10 @@ type ValkeyClusterSpec struct {
 	// Overwrite the default operator-provided configuration with user-defined config
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	ValkeyConfig *ValkeyConfig `json:"valkeyConfig,omitempty"`
+
+	// Enable password authentication
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	Password string `json:"password,omitempty"`
 }
 
 type ValkeyConfig struct {
