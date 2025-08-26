@@ -10,9 +10,7 @@
 msg post_start begin
 
 awk -F, '/nodename=/ && !/myself/ { split($5, arr, "="); print arr[2] }' nodes.conf | while IFS= read -r host; do
-	sh /scripts/meet.sh "$host" "$(shuf -i 5-30 -n1)" &
+	nohup sh /scripts/meet.sh "$host" "60" &
 done
-
-wait
 
 msg post_start end
