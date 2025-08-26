@@ -16,8 +16,9 @@ while [ "$(date +%s)" -lt "$end_time" ]; do
 
 	if [ "$RESPONSE" = "PONG" ]; then
 		msg meet "PONG response from $VALKEY_HOST"
-		msg meet "MEET $VALKEY_HOST"
-		valkey_cli 127.0.0.1 6379 -t 1 -c cluster meet "$VALKEY_HOST" 6379
+		ipaddress=$(getent hosts "$VALKEY_HOST" | awk '{ print $1 }')
+		msg meet "MEET $ipaddress"
+		valkey_cli 127.0.0.1 6379 -t 1 -c cluster meet "$ipaddress" 6379
 		break
 	else
 		msg meet "got response from $VALKEY_HOST: ${RESPONSE}"
