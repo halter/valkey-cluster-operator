@@ -75,6 +75,12 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 		metricsContainerArgs = append(metricsContainerArgs, "--redis.password", valkeyCluster.Spec.Password)
 	}
 
+	var command []string
+	// this is to preserve the behaviour of clusters running the old valkey image. the new images are under the namespace: ghcr.io/halter/valkey-server and have an entrypoint that handles running valkey-server
+	if valkeyCluster.Spec.Image == "ghcr.io/halter/valkey:8.0.2" {
+		command = []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-human-nodename "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}"`}
+	}
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -191,7 +197,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								},
 							},
 							WorkingDir: "/data",
-							Command:    []string{"sh", "-c", `exec valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-human-nodename "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}"`},
+							Command:    command,
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "valkey-data",
@@ -493,6 +499,7 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 }
 
 // Compares actual to desired, and returns true if there is a difference in any of the following:
+// - valkey-server image
 // - valkey-server command
 // - valkey-server lifecycle
 // - valkey-server environment
@@ -508,6 +515,10 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 	desired := r.statefulSet(stsName, statefulSetSize(valkeyCluster), valkeyCluster)
 
 	diff := false
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].Image, desired.Spec.Template.Spec.Containers[0].Image) {
+		log.Info(fmt.Sprintf("StatefulSet %s Image is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Image, desired.Spec.Template.Spec.Containers[0].Image)))
+		diff = true
+	}
 	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command) {
 		log.Info(fmt.Sprintf("StatefulSet %s Command is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Command, desired.Spec.Template.Spec.Containers[0].Command)))
 		diff = true

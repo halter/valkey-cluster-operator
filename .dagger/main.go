@@ -185,7 +185,26 @@ func (m *ValkeyClusterOperator) BuildValkeyContainerImage(
 	for _, platform := range platforms {
 		opts := dagger.ContainerOpts{Platform: platform}
 		valkey := dag.Container(opts).
-			From("valkey/valkey:" + valkeyVersion)
+			From("valkey/valkey:"+valkeyVersion).
+			WithNewFile(
+				"/entrypoint",
+				`#!/bin/bash
+
+_term() {
+  echo "Caught SIGTERM signal! Will wait 15 seconds before propegating SIGTERM"
+  sleep 15
+  kill -TERM "$child" 2>/dev/null
+}
+
+trap _term SIGTERM
+
+valkey-server ./valkey.conf --cluster-announce-client-ipv4 $POD_IP --cluster-announce-human-nodename "${HOSTNAME}${NODE_HOSTNAME_SUFFIX}" &
+
+child=$!
+wait "$child"`,
+				dagger.ContainerWithNewFileOpts{Permissions: 0o755},
+			).
+			WithEntrypoint([]string{"/entrypoint"})
 		platformVariants = append(platformVariants, valkey)
 	}
 	return platformVariants, nil
