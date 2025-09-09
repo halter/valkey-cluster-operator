@@ -25,9 +25,6 @@ if [ "${SLAVE_STATUS}" != "online" ]; then
 	exit 0
 fi
 
-echo "Pause writes"
-valkey_cli 127.0.0.1 6379 -c CLIENT PAUSE "5000" WRITE
-
 valkey_cli $SLAVE_IP $SLAVE_PORT -c cluster failover
 
 check_failover_complete() {

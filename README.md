@@ -13,7 +13,6 @@ The operator provides the following features:
 the Operator will handle resharding the slots for you.
 
 What is **NOT** implemented:
-- Valkey version upgrades. Right now only version 8.0.2 of Valkey is supported
 - Services. The only way to connect to the Valkey cluster is via the pod IP.
 
 ## Prerequisites

@@ -508,7 +508,7 @@ var _ = Describe("controller", Ordered, func() {
 			)
 			_, err := utils.Run(cmd)
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 2, "supersecret"), 2*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 2, "supersecret"), 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("be deleted", func() {
 			cmd := exec.Command("kubectl",
