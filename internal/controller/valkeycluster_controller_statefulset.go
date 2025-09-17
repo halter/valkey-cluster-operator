@@ -173,6 +173,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 										Port: intstr.FromInt(VALKEY_PORT),
 									},
 								},
+								InitialDelaySeconds: 15,
 							},
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -549,6 +550,7 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 		ss.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
 		ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
 		ss.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
+		ss.Spec.Template.Spec.Containers[0].ReadinessProbe = desired.Spec.Template.Spec.Containers[0].ReadinessProbe // this is intentionally left out of the compareActualToDesiredStatefulSet function
 
 		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
 		ss.Spec.Template.Spec.Containers[1].Image = desired.Spec.Template.Spec.Containers[1].Image
