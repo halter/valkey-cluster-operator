@@ -81,6 +81,11 @@ type ValkeyClusterSpec struct {
 	// Enable password authentication
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Password string `json:"password,omitempty"`
+
+	// Number of seconds after the container has started before liveness probes are initiated.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// +kubebuilder:default=30
+	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
 }
 
 type ValkeyConfig struct {

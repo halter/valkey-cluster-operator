@@ -49,6 +49,12 @@ spec:
               image:
                 description: Valkey docker image to use
                 type: string
+              initialDelaySeconds:
+                default: 30
+                description: Number of seconds after the container has started before
+                  liveness probes are initiated.
+                format: int32
+                type: integer
               minReadySeconds:
                 default: 10
                 description: |-

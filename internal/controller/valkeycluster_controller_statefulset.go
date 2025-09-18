@@ -173,7 +173,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 										Port: intstr.FromInt(VALKEY_PORT),
 									},
 								},
-								InitialDelaySeconds: 15,
+								InitialDelaySeconds: valkeyCluster.Spec.InitialDelaySeconds,
 							},
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
