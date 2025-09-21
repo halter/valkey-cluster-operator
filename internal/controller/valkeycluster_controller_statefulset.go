@@ -533,8 +533,8 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 		log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
 		diff = true
 	}
-	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe) {
-		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe)))
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds) {
+		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe.InitialDelaySeconds is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds)))
 		diff = true
 	}
 
