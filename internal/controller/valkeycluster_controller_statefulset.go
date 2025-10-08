@@ -169,11 +169,15 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt(VALKEY_PORT),
+									Exec: &corev1.ExecAction{
+										Command: []string{"/bin/bash", "/scripts/readiness.sh"},
 									},
 								},
 								InitialDelaySeconds: valkeyCluster.Spec.InitialDelaySeconds,
+								TimeoutSeconds:      5,
+								PeriodSeconds:       10,
+								SuccessThreshold:    1,
+								FailureThreshold:    100,
 							},
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -533,8 +537,8 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 		log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
 		diff = true
 	}
-	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds) {
-		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe.InitialDelaySeconds is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds)))
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe) {
+		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe)))
 		diff = true
 	}
 
