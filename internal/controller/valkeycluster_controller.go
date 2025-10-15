@@ -564,7 +564,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// RESHARDING
 	res, err = r.reconcileValkeySlots(ctx, valkeyCluster)
 	if err != nil {
-		log.Error(err, "Failed to reshard")
+		log.Error(err, "Failed to reshard",
+			"namespace", valkeyCluster.Namespace,
+			"name", valkeyCluster.Name,
+			"expectedShards", valkeyCluster.Spec.Shards,
+			"expectedReplicas", valkeyCluster.Spec.Replicas)
 		return ctrl.Result{}, err
 	}
 	if res != nil {
@@ -801,36 +805,132 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 	logger := log.FromContext(ctx)
 	var result *ctrl.Result
 
+	logger.Info("Starting reconcileValkeySlots",
+		"namespace", valkeyCluster.Namespace,
+		"name", valkeyCluster.Name,
+		"expectedShards", valkeyCluster.Spec.Shards)
+
 	clusterNodesForShard, err := r.buildClusterNodesForShard(ctx, valkeyCluster)
 	if err != nil {
+		logger.Error(err, "Failed to build cluster nodes for shard")
 		return result, fmt.Errorf("Failed to build cluster nodes for shard: %v", err)
 	}
 
+	logger.Info("Built cluster nodes for shard",
+		"actualShardCount", len(clusterNodesForShard),
+		"expectedShardCount", valkeyCluster.Spec.Shards)
+
+	// Log detailed cluster node information
+	for shardIdx, nodes := range clusterNodesForShard {
+		nodeIDs := make([]string, 0)
+		slotCounts := make([]int, 0)
+		for _, node := range nodes {
+			nodeIDs = append(nodeIDs, node.ID)
+			slotCounts = append(slotCounts, node.SlotCount())
+		}
+		logger.Info("Shard cluster nodes",
+			"shardIdx", shardIdx,
+			"nodeCount", len(nodes),
+			"nodeIDs", nodeIDs,
+			"slotCounts", slotCounts)
+	}
+
 	if len(clusterNodesForShard) != int(valkeyCluster.Spec.Shards) {
+		logger.Info("Shard count mismatch, triggering requeue",
+			"actualShardCount", len(clusterNodesForShard),
+			"expectedShardCount", valkeyCluster.Spec.Shards)
 		// scaling action should trigger requeue
 		result = &ctrl.Result{Requeue: true}
 	}
 
 	actionPlan, err := internalValkey.GenerateReshardingPlan(clusterNodesForShard, int(valkeyCluster.Spec.Shards))
 	if err != nil {
+		logger.Error(err, "Failed to generate resharding plan",
+			"shardCount", len(clusterNodesForShard),
+			"expectedShards", valkeyCluster.Spec.Shards)
 		return result, fmt.Errorf("Failed to build action plan: %v", err)
 	}
 
-	for _, plan := range actionPlan {
-		logger.Info(fmt.Sprintf("%s/%s: Begin migrating %d slots from %s to %s", valkeyCluster.Namespace, valkeyCluster.Name, plan.Slots, plan.FromID, plan.ToID))
-		_, _, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "reshard", "127.0.0.1:6379",
+	logger.Info("Generated resharding plan",
+		"planStepCount", len(actionPlan))
+
+	// Check for and fix any stuck slots before attempting resharding
+	if len(actionPlan) > 0 {
+		logger.Info("Checking cluster for stuck slots before resharding")
+		checkStdout, _, checkErr := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "check", "127.0.0.1:6379"})
+		if checkErr != nil {
+			logger.Info("Check command returned error",
+				"error", checkErr,
+				"stdout", checkStdout)
+		}
+
+		if hasOpenSlots(checkStdout) {
+			logger.Info("Detected stuck slots in cluster, attempting to fix")
+			if err := r.fixClusterSlots(ctx, valkeyCluster, logger); err != nil {
+				logger.Error(err, "Failed to fix stuck slots, will retry on next reconcile")
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, err
+			}
+			r.Recorder.Event(valkeyCluster, "Normal", "Fixed stuck slots",
+				"Fixed stuck slots before resharding")
+		}
+	}
+
+	for idx, plan := range actionPlan {
+		logger.Info("Executing resharding plan step",
+			"stepIndex", idx,
+			"totalSteps", len(actionPlan),
+			"namespace", valkeyCluster.Namespace,
+			"name", valkeyCluster.Name,
+			"slots", plan.Slots,
+			"fromID", plan.FromID,
+			"toID", plan.ToID)
+
+		stdout, stderr, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "reshard", "127.0.0.1:6379",
 			"--cluster-from", plan.FromID,
 			"--cluster-to", plan.ToID,
 			"--cluster-slots", fmt.Sprintf("%d", plan.Slots),
 			"--cluster-yes"})
 		if err != nil {
-			return nil, err
+			// Check if the cluster is down - if so, delay and retry
+			if isClusterDown(stdout, stderr, err) {
+				logger.Info("Cluster is down during resharding, will retry",
+					"retryAfter", "30s")
+				r.Recorder.Event(valkeyCluster, "Warning", "ClusterDown",
+					"Cluster is down during resharding, will retry in 30 seconds")
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			logger.Error(err, "Failed to execute resharding command",
+				"stepIndex", idx,
+				"slots", plan.Slots,
+				"fromID", plan.FromID,
+				"toID", plan.ToID,
+				"stdout", stdout,
+				"stderr", stderr)
+			return nil, fmt.Errorf("Failed to reshard %d slots from %s to %s: %v (stdout: %s, stderr: %s)",
+				plan.Slots, plan.FromID, plan.ToID, err, stdout, stderr)
 		}
+
+		logger.Info("Resharding command output",
+			"stepIndex", idx,
+			"stdout", stdout,
+			"stderr", stderr)
+
 		r.Recorder.Event(valkeyCluster, "Normal", "Migrated slots",
 			fmt.Sprintf("Migrated %d slots from %s to %s", plan.Slots, plan.FromID, plan.ToID))
-		logger.Info(fmt.Sprintf("%s/%s: Successfully migrated %d slots from %s to %s", valkeyCluster.Namespace, valkeyCluster.Name, plan.Slots, plan.FromID, plan.ToID))
-
+		logger.Info("Successfully migrated slots",
+			"stepIndex", idx,
+			"namespace", valkeyCluster.Namespace,
+			"name", valkeyCluster.Name,
+			"slots", plan.Slots,
+			"fromID", plan.FromID,
+			"toID", plan.ToID)
 	}
+
+	logger.Info("Completed reconcileValkeySlots",
+		"namespace", valkeyCluster.Namespace,
+		"name", valkeyCluster.Name)
+
 	return result, nil
 }
 
@@ -887,38 +987,88 @@ func (r *ValkeyClusterReconciler) updateClusterNodesStatus(ctx context.Context, 
 }
 
 func (r *ValkeyClusterReconciler) buildClusterNodesForShard(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (map[int][]*internalValkey.ClusterNode, error) {
+	logger := log.FromContext(ctx)
+
+	logger.Info("Building cluster nodes for shard",
+		"namespace", valkeyCluster.Namespace,
+		"name", valkeyCluster.Name)
+
 	clusterNodes, err := r.buildClusterNodes(ctx, valkeyCluster)
 	if err != nil {
+		logger.Error(err, "Failed to build cluster nodes")
 		return nil, err
 	}
+
+	logger.Info("Built cluster nodes",
+		"totalNodeCount", len(clusterNodes))
+
 	re := regexp.MustCompile(fmt.Sprintf(`%s-(\d+)-(\d+)`, valkeyCluster.Name))
 	clusterNodesForShard := make(map[int][]*internalValkey.ClusterNode)
 	for _, cn := range clusterNodes {
 		matches := re.FindAllStringSubmatch(cn.Pod, -1)
+		if len(matches) == 0 || len(matches[0]) < 2 {
+			logger.Error(fmt.Errorf("pod name does not match expected pattern"), "Failed to parse pod name",
+				"podName", cn.Pod,
+				"expectedPattern", fmt.Sprintf(`%s-(\d+)-(\d+)`, valkeyCluster.Name))
+			return nil, fmt.Errorf("pod name %s does not match expected pattern", cn.Pod)
+		}
 		shardIdx, err := strconv.Atoi(matches[0][1])
 		if err != nil {
-			return nil, fmt.Errorf("could not parse shard index: %v", err)
+			logger.Error(err, "Failed to parse shard index from pod name",
+				"podName", cn.Pod,
+				"shardIdxStr", matches[0][1])
+			return nil, fmt.Errorf("could not parse shard index from pod %s: %v", cn.Pod, err)
 		}
 		if _, ok := clusterNodesForShard[shardIdx]; !ok {
 			clusterNodesForShard[shardIdx] = make([]*internalValkey.ClusterNode, 0)
 		}
 		clusterNodesForShard[shardIdx] = append(clusterNodesForShard[shardIdx], cn)
+
+		logger.Info("Assigned cluster node to shard",
+			"podName", cn.Pod,
+			"nodeID", cn.ID,
+			"shardIdx", shardIdx,
+			"slotCount", cn.SlotCount())
 	}
+
+	logger.Info("Successfully built cluster nodes for shard",
+		"shardCount", len(clusterNodesForShard),
+		"totalNodeCount", len(clusterNodes))
+
 	return clusterNodesForShard, nil
 }
 
 func (r *ValkeyClusterReconciler) buildClusterNodes(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) ([]*internalValkey.ClusterNode, error) {
+	logger := log.FromContext(ctx)
 	clusterNodes := []*internalValkey.ClusterNode{}
 	podList := &corev1.PodList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(valkeyCluster.Namespace),
 		client.MatchingLabels(labelsForValkeyCluster(valkeyCluster.Name)),
 	}
+
+	logger.Info("Listing pods for cluster",
+		"namespace", valkeyCluster.Namespace,
+		"name", valkeyCluster.Name)
+
 	if err := r.List(ctx, podList, listOpts...); err != nil {
+		logger.Error(err, "Failed to list pods")
 		return nil, err
 	}
+
+	logger.Info("Found pods",
+		"podCount", len(podList.Items))
+
 	for _, pod := range podList.Items {
+		logger.Info("Processing pod",
+			"podName", pod.Name,
+			"podPhase", pod.Status.Phase,
+			"podIP", pod.Status.PodIP)
+
 		if pod.Status.Phase != corev1.PodRunning {
+			logger.Info("Skipping pod - not running",
+				"podName", pod.Name,
+				"podPhase", pod.Status.Phase)
 			continue
 		}
 		isPodReady := false
@@ -928,25 +1078,53 @@ func (r *ValkeyClusterReconciler) buildClusterNodes(ctx context.Context, valkeyC
 			}
 		}
 		if isPodReady {
+			logger.Info("Pod is ready, creating Valkey client",
+				"podName", pod.Name,
+				"podIP", pod.Status.PodIP)
+
 			client, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
 			if err != nil {
+				logger.Error(err, "Failed to create Valkey client",
+					"podName", pod.Name,
+					"podIP", pod.Status.PodIP)
 				return nil, err
 			}
 			defer client.Close()
+
 			clusterNodesTxt, err := client.Do(ctx, client.B().ClusterNodes().Build()).ToString()
 			if err != nil {
+				logger.Error(err, "Failed to get cluster nodes from pod",
+					"podName", pod.Name,
+					"podIP", pod.Status.PodIP)
 				return nil, err
 			}
+
 			cn, err := internalValkey.ParseClusterNode(clusterNodesTxt)
 			if err != nil {
+				logger.Error(err, "Failed to parse cluster node output",
+					"podName", pod.Name,
+					"clusterNodesTxt", clusterNodesTxt)
 				return nil, err
 			}
 			cn.Pod = pod.Name
+
+			logger.Info("Successfully parsed cluster node",
+				"podName", pod.Name,
+				"nodeID", cn.ID,
+				"slotCount", cn.SlotCount(),
+				"isMaster", cn.IsMaster())
+
 			clusterNodes = append(clusterNodes, cn)
 		} else {
+			logger.Info("Skipping pod - not ready",
+				"podName", pod.Name)
 			continue
 		}
 	}
+
+	logger.Info("Built cluster nodes",
+		"totalNodes", len(clusterNodes))
+
 	return clusterNodes, nil
 }
 
