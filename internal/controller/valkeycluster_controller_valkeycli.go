@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/go-logr/logr"
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -71,37 +70,4 @@ func isClusterDown(stdout, stderr string, err error) bool {
 	return strings.Contains(stdout, clusterDownMsg) ||
 		strings.Contains(stderr, clusterDownMsg) ||
 		(err != nil && strings.Contains(err.Error(), clusterDownMsg))
-}
-
-// fixClusterSlots attempts to fix stuck slots in the cluster using valkey-cli --cluster fix
-func (r *ValkeyClusterReconciler) fixClusterSlots(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, logger logr.Logger) error {
-	logger.Info("Attempting to fix stuck slots in cluster")
-
-	stdout, stderr, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "fix", "127.0.0.1:6379", "--cluster-fix-with-unreachable-primaries"})
-
-	logger.Info("Cluster fix command output",
-		"stdout", stdout,
-		"stderr", stderr)
-
-	if err != nil {
-		// Log the error but check if the fix actually succeeded despite error return
-		logger.Info("Fix command returned error, checking if it actually fixed the issues",
-			"error", err)
-	}
-
-	// Verify that slots are fixed by checking again
-	checkStdout, _, checkErr := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "check", "127.0.0.1:6379"})
-	if checkErr != nil {
-		// check command may return error even when cluster is healthy if there are warnings
-		logger.Info("Check command returned error after fix",
-			"error", checkErr,
-			"stdout", checkStdout)
-	}
-
-	if hasOpenSlots(checkStdout) {
-		return fmt.Errorf("Failed to fix open slots in cluster: stdout: %s, stderr: %s, original error: %v", stdout, stderr, err)
-	}
-
-	logger.Info("Successfully fixed stuck slots in cluster")
-	return nil
 }

@@ -89,6 +89,8 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -289,9 +291,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		if !slotsInShard {
 			// first we need to delete all node from cluster
+			jobMgr := r.NewValkeyJobManager()
 			for _, cn := range clusterNodesInLastSts {
 				log.Info(fmt.Sprintf("Removing %s from %s/%s", cn.ID, valkeyCluster.Namespace, valkeyCluster.Name))
-				_, _, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "del-node", fmt.Sprintf("127.0.0.1:%d", VALKEY_PORT), cn.ID})
+				err := jobMgr.DeleteNode(ctx, valkeyCluster, cn.ID)
 				if err != nil {
 					log.Error(err, "Failed to remove cluster node")
 					return ctrl.Result{}, err
@@ -856,24 +859,30 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 
 	// Check for and fix any stuck slots before attempting resharding
 	if len(actionPlan) > 0 {
+		jobMgr := r.NewValkeyJobManager()
 		logger.Info("Checking cluster for stuck slots before resharding")
-		checkStdout, _, checkErr := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "check", "127.0.0.1:6379"})
-		if checkErr != nil {
-			logger.Info("Check command returned error",
-				"error", checkErr,
-				"stdout", checkStdout)
+
+		fixed, err := jobMgr.FixStuckSlotsIfNeeded(ctx, valkeyCluster, logger)
+		if err != nil {
+			// Check if the error is due to cluster being down
+			if strings.Contains(err.Error(), "cluster is down during fix attempt") {
+				logger.Info("Cluster is down during fix, will retry",
+					"retryAfter", "30s")
+				r.Recorder.Event(valkeyCluster, "Warning", "ClusterDown",
+					"Cluster is down while fixing stuck slots, will retry in 30 seconds")
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			logger.Error(err, "Failed to fix stuck slots, will retry on next reconcile")
+			return &ctrl.Result{RequeueAfter: 30 * time.Second}, err
 		}
 
-		if hasOpenSlots(checkStdout) {
-			logger.Info("Detected stuck slots in cluster, attempting to fix")
-			if err := r.fixClusterSlots(ctx, valkeyCluster, logger); err != nil {
-				logger.Error(err, "Failed to fix stuck slots, will retry on next reconcile")
-				return &ctrl.Result{RequeueAfter: 30 * time.Second}, err
-			}
+		if fixed {
 			r.Recorder.Event(valkeyCluster, "Normal", "Fixed stuck slots",
 				"Fixed stuck slots before resharding")
 		}
 	}
+
+	jobMgr := r.NewValkeyJobManager()
 
 	for idx, plan := range actionPlan {
 		logger.Info("Executing resharding plan step",
@@ -885,14 +894,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 			"fromID", plan.FromID,
 			"toID", plan.ToID)
 
-		stdout, stderr, err := r.executeValkeyCli(ctx, valkeyCluster, []string{"--cluster", "reshard", "127.0.0.1:6379",
-			"--cluster-from", plan.FromID,
-			"--cluster-to", plan.ToID,
-			"--cluster-slots", fmt.Sprintf("%d", plan.Slots),
-			"--cluster-yes"})
+		err := jobMgr.ReshardSlots(ctx, valkeyCluster, plan.FromID, plan.ToID, plan.Slots)
 		if err != nil {
 			// Check if the cluster is down - if so, delay and retry
-			if isClusterDown(stdout, stderr, err) {
+			if strings.Contains(err.Error(), "CLUSTERDOWN") {
 				logger.Info("Cluster is down during resharding, will retry",
 					"retryAfter", "30s")
 				r.Recorder.Event(valkeyCluster, "Warning", "ClusterDown",
@@ -904,17 +909,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 				"stepIndex", idx,
 				"slots", plan.Slots,
 				"fromID", plan.FromID,
-				"toID", plan.ToID,
-				"stdout", stdout,
-				"stderr", stderr)
-			return nil, fmt.Errorf("Failed to reshard %d slots from %s to %s: %v (stdout: %s, stderr: %s)",
-				plan.Slots, plan.FromID, plan.ToID, err, stdout, stderr)
+				"toID", plan.ToID)
+			return nil, err
 		}
-
-		logger.Info("Resharding command output",
-			"stepIndex", idx,
-			"stdout", stdout,
-			"stderr", stderr)
 
 		r.Recorder.Event(valkeyCluster, "Normal", "Migrated slots",
 			fmt.Sprintf("Migrated %d slots from %s to %s", plan.Slots, plan.FromID, plan.ToID))
@@ -925,6 +922,33 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 			"slots", plan.Slots,
 			"fromID", plan.FromID,
 			"toID", plan.ToID)
+
+		// Check for stuck slots after this migration step
+		logger.Info("Checking for stuck slots after migration step",
+			"stepIndex", idx)
+
+		fixed, err := jobMgr.FixStuckSlotsIfNeeded(ctx, valkeyCluster, logger)
+		if err != nil {
+			// Check if the error is due to cluster being down
+			if strings.Contains(err.Error(), "cluster is down during fix attempt") {
+				logger.Info("Cluster is down during fix after migration, will retry",
+					"stepIndex", idx,
+					"retryAfter", "30s")
+				r.Recorder.Event(valkeyCluster, "Warning", "ClusterDown",
+					fmt.Sprintf("Cluster is down while fixing stuck slots after migration step %d, will retry in 30 seconds", idx))
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			logger.Error(err, "Failed to fix stuck slots after migration step, will retry on next reconcile",
+				"stepIndex", idx)
+			return &ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		}
+
+		if fixed {
+			r.Recorder.Event(valkeyCluster, "Normal", "Fixed stuck slots",
+				fmt.Sprintf("Fixed stuck slots after migration step %d", idx))
+			logger.Info("Successfully fixed stuck slots after migration step",
+				"stepIndex", idx)
+		}
 	}
 
 	logger.Info("Completed reconcileValkeySlots",
