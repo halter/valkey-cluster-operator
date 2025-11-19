@@ -82,7 +82,9 @@ type ValkeyClusterSpec struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Password string `json:"password,omitempty"`
 
-	// Number of seconds after the container has started before liveness probes are initiated.
+	// Number of seconds after the container has started before startup probe is initiated.
+	// Deprecated: This field is deprecated and will be removed in a future version.
+	// The startup probe now uses a fixed configuration.
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// +kubebuilder:default=30
 	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
