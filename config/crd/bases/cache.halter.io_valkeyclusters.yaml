@@ -51,8 +51,10 @@ spec:
                 type: string
               initialDelaySeconds:
                 default: 30
-                description: Number of seconds after the container has started before
-                  liveness probes are initiated.
+                description: |-
+                  Number of seconds after the container has started before startup probe is initiated.
+                  Deprecated: This field is deprecated and will be removed in a future version.
+                  The startup probe now uses a fixed configuration.
                 format: int32
                 type: integer
               minReadySeconds:
