@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Valkey Node Readiness Check for Kubernetes
-# Returns 0 (ready) if any of these conditions are met:
+# Valkey Node Startup Check for Kubernetes
+# Returns 0 (started) if any of these conditions are met:
 # 1. Cluster state is "ok"
 # 2. Node has zero slots allocated
 # 3. Node doesn't know about any other nodes (single node)
@@ -30,7 +30,7 @@ check_timeout() {
 	fi
 
 	if [ "$uptime" -ge $TIMEOUT_SECONDS ]; then
-		echo "Readiness check passed: Valkey uptime of ${uptime}s exceeds timeout of ${TIMEOUT_SECONDS}s"
+		echo "Startup check passed: Valkey uptime of ${uptime}s exceeds timeout of ${TIMEOUT_SECONDS}s"
 		return 0
 	fi
 	return 1
@@ -42,7 +42,7 @@ check_cluster_state() {
 	cluster_info=$(valkey_cli 127.0.0.1 6379 -t 1 -c CLUSTER INFO 2>/dev/null || echo "")
 
 	if echo "$cluster_info" | grep -q "cluster_state:ok"; then
-		echo "Readiness check passed: cluster state is ok"
+		echo "Startup check passed: cluster state is ok"
 		return 0
 	fi
 	return 1
@@ -65,7 +65,7 @@ check_slots() {
 	# Check if the line contains any slot ranges (format: [slot-slot] or single slots)
 	# Slots appear after the address and flags, typically after the 8th field
 	if ! echo "$myself_line" | grep -qE '\[?[0-9]+-?[0-9]*\]?'; then
-		echo "Readiness check passed: node has zero slots allocated"
+		echo "Startup check passed: node has zero slots allocated"
 		return 0
 	fi
 
@@ -87,14 +87,14 @@ check_single_node() {
 	node_count=$(echo "$nodes_info" | grep -c "^")
 
 	if [ "$node_count" -eq 1 ]; then
-		echo "Readiness check passed: node doesn't know about any other nodes"
+		echo "Startup check passed: node doesn't know about any other nodes"
 		return 0
 	fi
 
 	return 1
 }
 
-# Main readiness check logic
+# Main startup check logic
 main() {
 	# Check condition 4: timeout elapsed
 	if check_timeout; then
@@ -117,7 +117,7 @@ main() {
 	fi
 
 	# None of the conditions met
-	echo "Readiness check failed: waiting for cluster state ok, zero slots, single node, or timeout"
+	echo "Startup check failed: waiting for cluster state ok, zero slots, single node, or timeout"
 	exit 1
 }
 

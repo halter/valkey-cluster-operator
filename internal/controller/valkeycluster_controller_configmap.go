@@ -40,9 +40,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 		logger.Error(err, "failed to read utils.sh")
 		return "", err
 	}
-	readiness, err := scripts.ReadFile("scripts/readiness.sh")
+	startup, err := scripts.ReadFile("scripts/startup.sh")
 	if err != nil {
-		logger.Error(err, "failed to read readiness.sh")
+		logger.Error(err, "failed to read startup.sh")
 		return "", err
 	}
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
@@ -51,7 +51,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 		"post_start.sh": string(postStart),
 		"meet.sh":       string(meet),
 		"utils.sh":      string(utils),
-		"readiness.sh":  string(readiness),
+		"startup.sh":    string(startup),
 	}
 	valkeyConfContent, err := getValkeyConfigContent(valkeyCluster)
 	if err != nil {

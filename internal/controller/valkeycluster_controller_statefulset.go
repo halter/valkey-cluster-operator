@@ -167,17 +167,23 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 									},
 								},
 							},
-							ReadinessProbe: &corev1.Probe{
+							StartupProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									Exec: &corev1.ExecAction{
-										Command: []string{"/bin/bash", "/scripts/readiness.sh"},
+										Command: []string{"/bin/bash", "/scripts/startup.sh"},
 									},
 								},
-								InitialDelaySeconds: valkeyCluster.Spec.InitialDelaySeconds,
-								TimeoutSeconds:      5,
-								PeriodSeconds:       10,
-								SuccessThreshold:    1,
-								FailureThreshold:    100,
+								TimeoutSeconds:   5,
+								PeriodSeconds:    10,
+								SuccessThreshold: 1,
+								FailureThreshold: 30,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									TCPSocket: &corev1.TCPSocketAction{
+										Port: intstr.FromInt(VALKEY_PORT),
+									},
+								},
 							},
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -508,7 +514,7 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 // - valkey-server command
 // - valkey-server lifecycle
 // - valkey-server environment
-// - valkey-server readiness probe
+// - valkey-server startup probe
 // - metrics command
 // It's really important that you consider updating applyDesiredStatefulSetSpec if this function changes
 func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, stsName string) (bool, error) {
@@ -537,8 +543,8 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 		log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
 		diff = true
 	}
-	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe) {
-		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe)))
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].StartupProbe, desired.Spec.Template.Spec.Containers[0].StartupProbe) {
+		log.Info(fmt.Sprintf("StatefulSet %s StartupProbe is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].StartupProbe, desired.Spec.Template.Spec.Containers[0].StartupProbe)))
 		diff = true
 	}
 
@@ -559,7 +565,7 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 		ss.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
 		ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
 		ss.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
-		ss.Spec.Template.Spec.Containers[0].ReadinessProbe = desired.Spec.Template.Spec.Containers[0].ReadinessProbe
+		ss.Spec.Template.Spec.Containers[0].StartupProbe = desired.Spec.Template.Spec.Containers[0].StartupProbe
 
 		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
 		ss.Spec.Template.Spec.Containers[1].Image = desired.Spec.Template.Spec.Containers[1].Image
