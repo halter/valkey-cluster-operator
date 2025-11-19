@@ -104,8 +104,9 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 					},
 				},
 				Spec: corev1.PodSpec{
-					NodeSelector: valkeyCluster.Spec.NodeSelector,
-					Tolerations:  valkeyCluster.Spec.Tolerations,
+					ServiceAccountName: "valkey-cluster-operator-valkey-pod",
+					NodeSelector:       valkeyCluster.Spec.NodeSelector,
+					Tolerations:        valkeyCluster.Spec.Tolerations,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &[]bool{true}[0],
 						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19

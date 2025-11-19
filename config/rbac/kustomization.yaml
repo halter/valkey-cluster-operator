@@ -24,3 +24,7 @@ resources:
 # if you do not want those helpers be installed with your Project.
 - valkeycluster_editor_role.yaml
 - valkeycluster_viewer_role.yaml
+# RBAC for Valkey pods to query Kubernetes API for pod discovery
+- valkey_pod_service_account.yaml
+- valkey_pod_role.yaml
+- valkey_pod_role_binding.yaml
