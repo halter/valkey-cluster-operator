@@ -303,7 +303,25 @@ func (m *ValkeyClusterOperator) BuildAndLoadLocally(
 		return err
 	}
 
-	return m.loadSingleArchImage(ctx, valkeyVariants, hostPlatform, "valkey-server:latest", sock)
+	err = m.loadSingleArchImage(ctx, valkeyVariants, hostPlatform, "valkey-server:latest", sock)
+	if err != nil {
+		return err
+	}
+
+	// Load versioned images for upgrade testing
+	upgradeTestVersions := []string{"8.0.5", "9.0.1"}
+	for _, version := range upgradeTestVersions {
+		valkeyVersionedVariants, err := m.BuildValkeyContainerImage(ctx, version)
+		if err != nil {
+			return err
+		}
+		err = m.loadSingleArchImage(ctx, valkeyVersionedVariants, hostPlatform, "valkey-server:"+version, sock)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (m *ValkeyClusterOperator) detectHostPlatform(ctx context.Context) (string, error) {
@@ -404,6 +422,8 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 		WithExec([]string{"kind", "create", "cluster"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-server:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-server:8.0.5", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "load", "docker-image", "valkey-server:9.0.1", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithDirectory("/src", source).
 		WithWorkdir("/src")
 
