@@ -124,7 +124,7 @@ func (m *ValkeyClusterOperator) PublishValkeyDocker(
 	ghToken *dagger.Secret,
 ) error {
 
-	valkeyVersions := []string{"8.0.3", "8.0.4", "8.0.5", "8.1.3"}
+	valkeyVersions := []string{"8.0.3", "8.0.4", "8.0.5", "8.1.3", "8.1.5", "9.0.1"}
 
 	for _, valkeyVersion := range valkeyVersions {
 		// container registry for the multi-platform image
