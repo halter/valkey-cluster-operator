@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -95,6 +97,9 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 			},
 			MinReadySeconds:     valkeyCluster.Spec.MinReadySeconds,
 			PodManagementPolicy: appsv1.ParallelPodManagement, // TODO: reconcile statefulsets that do not have this option set
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.OnDeleteStatefulSetStrategyType,
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: ls,
@@ -337,16 +342,6 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 			return &ctrl.Result{}, err
 		}
 
-		// check if any update is occuring for stateful set, if so re-schedule reconcile
-		found, err = r.findStatefulsetByName(ctx, valkeyCluster.Namespace, stsName)
-		if err != nil {
-			log.Error(err, fmt.Sprintf("Failed to get StatefulSet %s/%s", valkeyCluster.Namespace, stsName))
-			return &ctrl.Result{}, err
-		}
-		if found.Status.CurrentRevision != found.Status.UpdateRevision {
-			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-		}
-
 		// update containers[0].Command if there is a difference
 		// Update if there is a difference in the following attributes:
 		// Command
@@ -544,6 +539,11 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 		diff = true
 	}
 
+	if actual.Spec.UpdateStrategy.Type != desired.Spec.UpdateStrategy.Type {
+		log.Info(fmt.Sprintf("StatefulSet %s UpdateStrategy.Type is different: actual=%s desired=%s", stsName, actual.Spec.UpdateStrategy.Type, desired.Spec.UpdateStrategy.Type))
+		diff = true
+	}
+
 	return diff, nil
 }
 
@@ -559,6 +559,108 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 
 		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
 		ss.Spec.Template.Spec.Containers[1].Image = desired.Spec.Template.Spec.Containers[1].Image
+
+		ss.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 		return ss
 	}
+}
+
+// performRollingUpdate identifies pods that are on an outdated StatefulSet revision and deletes
+// one pod per shard per reconcile, only after verifying the Valkey cluster is fully healthy.
+// Because the StatefulSets use OnDelete update strategy, Kubernetes will not restart pods
+// automatically; this method drives the rollout. Processing one pod per shard in parallel
+// keeps the rollout fast while maintaining cluster safety.
+func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (*ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	stsList := &appsv1.StatefulSetList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(valkeyCluster.Namespace),
+		client.MatchingLabels(labelsForValkeyCluster(valkeyCluster.Name)),
+	}
+	if err := r.List(ctx, stsList, listOpts...); err != nil {
+		return nil, err
+	}
+
+	// Process shards in a deterministic order so that shard N is fully updated
+	// before shard N+1 is touched. This avoids simultaneous disruption across
+	// multiple shards.
+	sort.Slice(stsList.Items, func(i, j int) bool {
+		return stsList.Items[i].Name < stsList.Items[j].Name
+	})
+
+	for _, sts := range stsList.Items {
+		if sts.Status.UpdateRevision == "" || sts.Status.UpdateRevision == sts.Status.CurrentRevision {
+			continue
+		}
+
+		podList := &corev1.PodList{}
+		podListOpts := []client.ListOption{
+			client.InNamespace(valkeyCluster.Namespace),
+			client.MatchingLabels(map[string]string{
+				"statefulset.kubernetes.io/sts-name": sts.Name,
+				"cache/name":                         valkeyCluster.Name,
+			}),
+		}
+		if err := r.List(ctx, podList, podListOpts...); err != nil {
+			return nil, err
+		}
+
+		var podsNeedingUpdate []corev1.Pod
+		for _, pod := range podList.Items {
+			// Skip pods that are already being deleted — they will be recreated by
+			// the StatefulSet controller with the new template. Counting them here
+			// would cause a second deletion to be scheduled before the first one
+			// completes, leading to cascade deletions.
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			if pod.Labels["controller-revision-hash"] != sts.Status.UpdateRevision {
+				podsNeedingUpdate = append(podsNeedingUpdate, pod)
+			}
+		}
+		if len(podsNeedingUpdate) == 0 {
+			continue
+		}
+
+		// Gate each pod deletion on cluster health. All pods must be Running/Ready
+		// and the cluster must report cluster_state:ok before we proceed.
+		healthy, err := r.isValkeyClusterHealthy(ctx, valkeyCluster)
+		if err != nil {
+			logger.Error(err, "Failed to check Valkey cluster health before rolling update, will retry")
+			return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !healthy {
+			logger.Info("Valkey cluster is not healthy, deferring rolling update",
+				"shard", sts.Name,
+				"podsNeedingUpdate", len(podsNeedingUpdate),
+			)
+			r.Recorder.Event(valkeyCluster, "Warning", "RollingUpdate",
+				fmt.Sprintf("Cluster not healthy, deferring rolling update of shard %s (%d pods pending)", sts.Name, len(podsNeedingUpdate)))
+			return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		// Delete replicas before masters: higher ordinal name = replica, lower = master.
+		sort.Slice(podsNeedingUpdate, func(i, j int) bool {
+			return podsNeedingUpdate[i].Name > podsNeedingUpdate[j].Name
+		})
+		podToDelete := podsNeedingUpdate[0]
+		logger.Info("Deleting pod for rolling update",
+			"pod", podToDelete.Name,
+			"shard", sts.Name,
+			"remainingAfterDeletion", len(podsNeedingUpdate)-1,
+		)
+		if err := r.Delete(ctx, &podToDelete); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete pod for rolling update", "pod", podToDelete.Name)
+			return nil, err
+		}
+		r.Recorder.Event(valkeyCluster, "Normal", "RollingUpdate",
+			fmt.Sprintf("Deleted pod %s for rolling update, %d pods remaining in shard %s", podToDelete.Name, len(podsNeedingUpdate)-1, sts.Name))
+
+		// Return and requeue — we only ever delete one pod per reconcile cycle,
+		// and we complete one shard before advancing to the next.
+		return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
+	return nil, nil
 }

@@ -36,7 +36,7 @@ func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCl
 	}, runtime.NewParameterCodec(r.Scheme))
 	exec, err := remotecommand.NewSPDYExecutor(r.RestConfig, "POST", req.URL())
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to execute valkey-cli %s: %v", strings.Join(args, " "), err)
+		return "", "", fmt.Errorf("Failed to execute valkey-cli %s: %w", strings.Join(args, " "), err)
 	}
 	var stdout, stderr bytes.Buffer
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
@@ -47,7 +47,7 @@ func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCl
 	stdoutStr := stdout.String()
 	stderrStr := stderr.String()
 	if err != nil {
-		return stdoutStr, stderrStr, fmt.Errorf("Failed executing command 'valkey-cli %s': stdout: %s, stderr: %s, err: %v", strings.Join(args, " "), stdoutStr, stderrStr, err)
+		return stdoutStr, stderrStr, fmt.Errorf("Failed executing command 'valkey-cli %s': stdout: %s, stderr: %s, err: %w", strings.Join(args, " "), stdoutStr, stderrStr, err)
 	}
 	return stdoutStr, stderrStr, nil
 }
