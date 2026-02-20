@@ -36,7 +36,7 @@ func (r *ValkeyClusterReconciler) executeValkeyCliJob(ctx context.Context, valke
 		"args", args)
 
 	if err := r.Create(ctx, job); err != nil {
-		return "", "", fmt.Errorf("Failed to create valkey-cli Job: %v", err)
+		return "", "", fmt.Errorf("Failed to create valkey-cli Job: %w", err)
 	}
 
 	// Wait for Job to complete
@@ -135,7 +135,13 @@ func (r *ValkeyClusterReconciler) waitForJobCompletion(ctx context.Context, name
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)
 		if err != nil {
-			return "", "", fmt.Errorf("Failed to get Job %s: %v", jobName, err)
+			if apierrors.IsNotFound(err) {
+				// Cache may not have synced yet after Job creation, retry
+				logger.Info("Job not found in cache yet, retrying", "jobName", jobName)
+				time.Sleep(pollInterval)
+				continue
+			}
+			return "", "", fmt.Errorf("Failed to get Job %s: %w", jobName, err)
 		}
 
 		// Check if Job completed
@@ -167,7 +173,7 @@ func (r *ValkeyClusterReconciler) getJobLogs(ctx context.Context, namespace, job
 	})
 	if err != nil {
 		logger.Error(err, "Failed to list pods for Job", "jobName", jobName)
-		return "", "", fmt.Errorf("Failed to list pods for Job %s: %v", jobName, err)
+		return "", "", fmt.Errorf("Failed to list pods for Job %s: %w", jobName, err)
 	}
 
 	if len(podList.Items) == 0 {
@@ -195,7 +201,7 @@ func (r *ValkeyClusterReconciler) getJobLogs(ctx context.Context, namespace, job
 	logs, err := req.Stream(ctx)
 	if err != nil {
 		logger.Error(err, "Failed to get log stream from pod", "podName", pod.Name)
-		return "", "", fmt.Errorf("Failed to get logs from pod %s: %v", pod.Name, err)
+		return "", "", fmt.Errorf("Failed to get logs from pod %s: %w", pod.Name, err)
 	}
 	defer logs.Close()
 
@@ -204,7 +210,7 @@ func (r *ValkeyClusterReconciler) getJobLogs(ctx context.Context, namespace, job
 	_, err = io.Copy(buf, logs)
 	if err != nil {
 		logger.Error(err, "Failed to read logs from pod", "podName", pod.Name)
-		return "", "", fmt.Errorf("Failed to read logs from pod %s: %v", pod.Name, err)
+		return "", "", fmt.Errorf("Failed to read logs from pod %s: %w", pod.Name, err)
 	}
 
 	output := buf.String()
@@ -236,7 +242,7 @@ func (r *ValkeyClusterReconciler) deleteJob(ctx context.Context, namespace, jobN
 	}
 
 	if err := r.Delete(ctx, job, deleteOptions); err != nil {
-		return fmt.Errorf("Failed to delete Job %s: %v", jobName, err)
+		return fmt.Errorf("Failed to delete Job %s: %w", jobName, err)
 	}
 
 	logger.Info("Successfully deleted Job", "jobName", jobName)

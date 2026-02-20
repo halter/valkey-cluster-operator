@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
@@ -44,7 +45,7 @@ func (m *ValkeyJobManager) getTargetPodAddress(ctx context.Context, valkeyCluste
 	}, pod)
 	if err != nil {
 		logger.Error(err, "Failed to get target pod", "podName", podName)
-		return "", fmt.Errorf("Failed to get target pod %s: %v", podName, err)
+		return "", fmt.Errorf("Failed to get target pod %s: %w", podName, err)
 	}
 
 	logger.Info("Found target pod",
@@ -77,7 +78,7 @@ func (m *ValkeyJobManager) ReshardSlots(ctx context.Context, valkeyCluster *cach
 
 	targetAddress, err := m.getTargetPodAddress(ctx, valkeyCluster)
 	if err != nil {
-		return fmt.Errorf("Failed to get target pod address: %v", err)
+		return fmt.Errorf("Failed to get target pod address: %w", err)
 	}
 
 	args := []string{
@@ -97,7 +98,7 @@ func (m *ValkeyJobManager) ReshardSlots(ctx context.Context, valkeyCluster *cach
 			"slotCount", slotCount,
 			"stdout", stdout,
 			"stderr", stderr)
-		return fmt.Errorf("Failed to reshard %d slots from %s to %s: %v", slotCount, fromNodeID, toNodeID, err)
+		return fmt.Errorf("Failed to reshard %d slots from %s to %s: %w", slotCount, fromNodeID, toNodeID, err)
 	}
 
 	logger.Info("Successfully resharded slots via Job",
@@ -117,7 +118,7 @@ func (m *ValkeyJobManager) CheckCluster(ctx context.Context, valkeyCluster *cach
 
 	targetAddress, err := m.getTargetPodAddress(ctx, valkeyCluster)
 	if err != nil {
-		return "", fmt.Errorf("Failed to get target pod address: %v", err)
+		return "", fmt.Errorf("Failed to get target pod address: %w", err)
 	}
 
 	args := []string{
@@ -144,7 +145,7 @@ func (m *ValkeyJobManager) FixClusterSlots(ctx context.Context, valkeyCluster *c
 
 	targetAddress, err := m.getTargetPodAddress(ctx, valkeyCluster)
 	if err != nil {
-		return fmt.Errorf("Failed to get target pod address: %v", err)
+		return fmt.Errorf("Failed to get target pod address: %w", err)
 	}
 
 	args := []string{
@@ -178,7 +179,7 @@ func (m *ValkeyJobManager) FixClusterSlots(ctx context.Context, valkeyCluster *c
 	}
 
 	if hasOpenSlots(checkStdout) {
-		return fmt.Errorf("Failed to fix open slots in cluster: stdout: %s, stderr: %s, original error: %v", stdout, stderr, err)
+		return fmt.Errorf("Failed to fix open slots in cluster: stdout: %s, stderr: %s, original error: %w", stdout, stderr, err)
 	}
 
 	logger.Info("Successfully fixed stuck slots via Job")
@@ -195,7 +196,7 @@ func (m *ValkeyJobManager) DeleteNode(ctx context.Context, valkeyCluster *cachev
 
 	targetAddress, err := m.getTargetPodAddress(ctx, valkeyCluster)
 	if err != nil {
-		return fmt.Errorf("Failed to get target pod address: %v", err)
+		return fmt.Errorf("Failed to get target pod address: %w", err)
 	}
 
 	args := []string{
@@ -207,11 +208,17 @@ func (m *ValkeyJobManager) DeleteNode(ctx context.Context, valkeyCluster *cachev
 	stdout, stderr, err := m.reconciler.executeValkeyCliJob(ctx, valkeyCluster, args)
 
 	if err != nil {
+		// Treat "No such node ID" as success - the node is already removed
+		if strings.Contains(stdout, "No such node ID") || strings.Contains(stderr, "No such node ID") {
+			logger.Info("Node already removed from cluster (No such node ID), treating as success",
+				"nodeID", nodeID)
+			return nil
+		}
 		logger.Error(err, "Failed to delete node from cluster",
 			"nodeID", nodeID,
 			"stdout", stdout,
 			"stderr", stderr)
-		return fmt.Errorf("Failed to delete node %s from cluster: %v", nodeID, err)
+		return fmt.Errorf("Failed to delete node %s from cluster: %w", nodeID, err)
 	}
 
 	logger.Info("Successfully deleted node from cluster via Job",

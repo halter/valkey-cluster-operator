@@ -419,7 +419,8 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 		WithExec([]string{"go", "install", "sigs.k8s.io/kind@v0.29.0"}).
 		WithUnixSocket("/var/run/docker.sock", sock).
 		WithEnvVariable("CACHEBUSTER", time.Now().String()).
-		WithExec([]string{"kind", "create", "cluster"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "delete", "cluster", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
+		WithExec([]string{"kind", "create", "cluster"}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-cluster-operator:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-server:latest", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
 		WithExec([]string{"kind", "load", "docker-image", "valkey-server:8.0.5", "--name", "kind"}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny}).
@@ -431,7 +432,10 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 	daggerEngineContainerName = strings.TrimSpace(daggerEngineContainerName)
 	container.WithExec([]string{"bash", "-c", "docker network connect kind " + daggerEngineContainerName + " || true"}).Stdout(ctx)
 
-	data, _ := container.WithExec([]string{"kind", "get", "kubeconfig"}).Stdout(ctx)
+	data, err := container.WithExec([]string{"kind", "get", "kubeconfig"}).Stdout(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get kubeconfig: %w", err)
+	}
 
 	kindControlPlainContainerID, _ := container.WithExec([]string{"bash", "-c", `docker ps --format '{{json .}}' | jq -r '. | select(.Names=="kind-control-plane") | .ID'`}).Stdout(ctx)
 	kindControlPlainContainerID = strings.TrimSpace(kindControlPlainContainerID)
@@ -439,7 +443,12 @@ func (m *ValkeyClusterOperator) BuildTestEnv(
 	kindControlPlainContainerIP = strings.TrimSpace(kindControlPlainContainerIP)
 
 	kubeConfig := KubeConfig{}
-	_ = yaml.Unmarshal([]byte(data), &kubeConfig)
+	if err := yaml.Unmarshal([]byte(data), &kubeConfig); err != nil {
+		return nil, fmt.Errorf("failed to parse kubeconfig: %w", err)
+	}
+	if len(kubeConfig.Clusters) == 0 || len(kubeConfig.Users) == 0 {
+		return nil, fmt.Errorf("kubeconfig is missing clusters or users")
+	}
 
 	kubeConfig.Clusters[0].Cluster.Server = "https://" + kindControlPlainContainerIP + ":6443"
 

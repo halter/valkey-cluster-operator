@@ -49,7 +49,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 	}
 	valkeyConfContent, err := getValkeyConfigContent(valkeyCluster)
 	if err != nil {
-		return "", fmt.Errorf("failed to read valkey config content: %v", err)
+		return "", fmt.Errorf("failed to read valkey config content: %w", err)
 	}
 	valkeyConfHash := fmt.Sprintf("%x", sha256.Sum256([]byte(valkeyConfContent)))
 	cmData["valkey.conf"] = valkeyConfContent

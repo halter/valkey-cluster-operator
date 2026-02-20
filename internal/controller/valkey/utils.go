@@ -68,11 +68,11 @@ func parseClusterNodeLine(line string) (*ClusterNode, error) {
 				parts := strings.Split(fields[i], "-")
 				start, err := strconv.Atoi(parts[0])
 				if err != nil {
-					return nil, fmt.Errorf("failed to convert string %v: line: %s", err, line)
+					return nil, fmt.Errorf("failed to convert string %w: line: %s", err, line)
 				}
 				end, err := strconv.Atoi(parts[1])
 				if err != nil {
-					return nil, fmt.Errorf("failed to convert string %v: line: %s", err, line)
+					return nil, fmt.Errorf("failed to convert string %w: line: %s", err, line)
 				}
 				slotRange := &ClusterSlotRange{
 					Start: start,
@@ -82,7 +82,7 @@ func parseClusterNodeLine(line string) (*ClusterNode, error) {
 			} else {
 				start, err := strconv.Atoi(fields[i])
 				if err != nil {
-					return nil, fmt.Errorf("failed to convert string %v: line: %s", err, line)
+					return nil, fmt.Errorf("failed to convert string %w: line: %s", err, line)
 				}
 				end := start
 				slotRange := &ClusterSlotRange{
@@ -298,7 +298,7 @@ func GenerateReshardingPlan(clusterNodesForShard map[int][]*ClusterNode, desired
 		}
 	}
 
-	for fromID, _ := range rid {
+	for fromID := range rid {
 		if rid[fromID] == 0 {
 			continue
 		}

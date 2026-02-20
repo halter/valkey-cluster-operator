@@ -180,7 +180,7 @@ var _ = Describe("controller", Ordered, func() {
 			)
 			_, err := utils.Run(cmd)
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 3, 1, ""), 5*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 3, 1, ""), 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("should scale down", func() {
 			cmd := exec.Command("kubectl",
@@ -191,10 +191,7 @@ var _ = Describe("controller", Ordered, func() {
 			)
 			_, err := utils.Run(cmd)
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			// Scale down requires resharding slots away from the removed shard.
-			// Each resharding step runs as a K8s Job with up to 5min timeout.
-			// Scale 3->2 shards needs 2 resharding steps, so allow 12 minutes.
-			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 1, ""), 12*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 1, ""), 5*time.Minute, 15*time.Second).Should(Succeed())
 			getPods := func() error {
 				cmd = exec.Command("kubectl", "get", "pods",
 					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
@@ -268,6 +265,11 @@ var _ = Describe("controller", Ordered, func() {
 				ExpectWithOffset(2, err).NotTo(HaveOccurred())
 				podNames := utils.GetNonEmptyLines(string(podOutput))
 
+				// At this point: 2 shards x (1 master + 2 replicas) = 6 pods
+				if len(podNames) != 6 {
+					return fmt.Errorf("expected 6 pods, got %d", len(podNames))
+				}
+
 				for _, podName := range podNames {
 					cmd = exec.Command("kubectl", "get", "pod", podName,
 						"-o", "jsonpath={.spec.containers[0].resources}",
@@ -306,7 +308,7 @@ var _ = Describe("controller", Ordered, func() {
 				}
 				return nil
 			}
-			EventuallyWithOffset(1, verifyPodResources, 10*time.Minute, 15*time.Second).Should(Succeed())
+			EventuallyWithOffset(1, verifyPodResources, 5*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("change minReadySeconds", func() {
 			verifyClusterMinReadySeconds := func() error {
@@ -672,10 +674,10 @@ spec:
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
 		By("waiting for rolling update to complete")
-		EventuallyWithOffset(1, verifyClusterState(upgradeClusterName, 2, 1, ""), 10*time.Minute, 15*time.Second).Should(Succeed())
+		EventuallyWithOffset(1, verifyClusterState(upgradeClusterName, 2, 1, ""), 5*time.Minute, 15*time.Second).Should(Succeed())
 
 		By("verifying cluster is running version 9.0.1")
-		EventuallyWithOffset(1, verifyClusterVersion(upgradeClusterName, "9.0.1"), 2*time.Minute, 5*time.Second).Should(Succeed())
+		EventuallyWithOffset(1, verifyClusterVersion(upgradeClusterName, "9.0.1"), 5*time.Minute, 15*time.Second).Should(Succeed())
 
 		By("verifying test data survived the upgrade")
 		cmd = exec.Command("kubectl", "-n", namespace, "exec", upgradeClusterName+"-0-0", "-c", "valkey-cluster-node", "--",
@@ -700,7 +702,7 @@ func verifyClusterState(name string, shards, replicas int, password string) func
 		)
 		podOutput, err := utils.Run(cmd)
 		if err != nil {
-			return fmt.Errorf("recieved error getting pods: %v", err)
+			return fmt.Errorf("recieved error getting pods: %w", err)
 		}
 		podNames := utils.GetNonEmptyLines(string(podOutput))
 		if len(podNames) != shards+shards*replicas {
@@ -715,7 +717,7 @@ func verifyClusterState(name string, shards, replicas int, password string) func
 			)
 			status, err := utils.Run(cmd)
 			if err != nil {
-				return fmt.Errorf("received error getting pod phase: %v", err)
+				return fmt.Errorf("received error getting pod phase: %w", err)
 			}
 			if string(status) != "Running" {
 				return fmt.Errorf("valkey node pod (%s) in %s status", podName, status)
@@ -731,7 +733,7 @@ func verifyClusterState(name string, shards, replicas int, password string) func
 			}
 			clusterNodesTxt, _, err := utils.RunWithSplitOutput(cmd)
 			if err != nil {
-				return fmt.Errorf("received error running kubectl exec: %v", err)
+				return fmt.Errorf("received error running kubectl exec: %w", err)
 
 			}
 			if len(clusterNodesTxt) <= 0 {
@@ -740,14 +742,14 @@ func verifyClusterState(name string, shards, replicas int, password string) func
 
 			cn, err := valkey.ParseClusterNode(string(clusterNodesTxt))
 			if err != nil {
-				return fmt.Errorf("received error parsing cluster node: %v", err)
+				return fmt.Errorf("received error parsing cluster node: %w", err)
 			}
 			cn.Pod = podName
 			clusterNodes = append(clusterNodes, cn)
 
 			clusterNodesAll, err := valkey.ParseClusterNodes(strings.TrimSpace(string(clusterNodesTxt)))
 			if err != nil {
-				return fmt.Errorf("received error parsing cluster nodes: %v", err)
+				return fmt.Errorf("received error parsing cluster nodes: %w", err)
 			}
 			clusterNodesByPod[podName] = clusterNodesAll
 		}
@@ -816,7 +818,7 @@ func verifyClusterState(name string, shards, replicas int, password string) func
 			}
 			infoReplication, _, err := utils.RunWithSplitOutput(cmd)
 			if err != nil {
-				return fmt.Errorf("received error running kubectl exec: %v", err)
+				return fmt.Errorf("received error running kubectl exec: %w", err)
 			}
 			re := regexp.MustCompile(`connected_slaves:(\d+)`)
 			matches := re.FindStringSubmatch(string(infoReplication))
@@ -847,10 +849,10 @@ func verifyClusterState(name string, shards, replicas int, password string) func
 			cmd = exec.Command("kubectl", "-n", namespace, "exec", podName, "-c", "valkey-exporter", "--", "wget", "-qO-", "localhost:9121/metrics")
 			metricsOutput, _, err := utils.RunWithSplitOutput(cmd)
 			if err != nil {
-				return fmt.Errorf("received error running kubectl exec: %v", err)
+				return fmt.Errorf("received error running kubectl exec: %w", err)
 
 			}
-			if !(strings.Contains(string(metricsOutput), "redis_up 1") && strings.Contains(string(metricsOutput), "redis_cluster_slots_pfail 0")) {
+			if !strings.Contains(string(metricsOutput), "redis_up 1") || !strings.Contains(string(metricsOutput), "redis_cluster_slots_pfail 0") {
 				return fmt.Errorf("expected metrics output to contain 'redis_up 1' && 'redis_cluster_slots_pfail 0' but got: %s", string(metricsOutput))
 			}
 		}
@@ -871,7 +873,7 @@ func verifyClusterVersion(name string, expectedVersion string) func() error {
 		)
 		podOutput, err := utils.Run(cmd)
 		if err != nil {
-			return fmt.Errorf("received error getting pods: %v", err)
+			return fmt.Errorf("received error getting pods: %w", err)
 		}
 		podNames := utils.GetNonEmptyLines(string(podOutput))
 		if len(podNames) == 0 {
@@ -883,7 +885,7 @@ func verifyClusterVersion(name string, expectedVersion string) func() error {
 				"valkey-cli", "INFO", "server")
 			infoOutput, err := utils.Run(cmd)
 			if err != nil {
-				return fmt.Errorf("received error running valkey-cli INFO: %v", err)
+				return fmt.Errorf("received error running valkey-cli INFO: %w", err)
 			}
 
 			re := regexp.MustCompile(`valkey_version:(\S+)`)
