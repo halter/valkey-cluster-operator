@@ -331,6 +331,52 @@ func GenerateReshardingPlan(clusterNodesForShard map[int][]*ClusterNode, desired
 	return actionPlan, nil
 }
 
+// ReplicationInfo holds parsed fields from INFO REPLICATION output.
+type ReplicationInfo struct {
+	Role                 string
+	MasterLinkStatus     string
+	MasterSyncInProgress int
+	MasterReplOffset     int64
+	SlaveReplOffset      int64
+}
+
+// ParseInfoReplication parses the output of INFO REPLICATION into a ReplicationInfo struct.
+// The valkey-go client may prepend "txt:" to the response and uses \r\n line endings.
+func ParseInfoReplication(infoTxt string) ReplicationInfo {
+	info := ReplicationInfo{}
+	// The valkey-go client may prepend "txt:" to the response
+	infoTxt = strings.TrimPrefix(infoTxt, "txt:")
+	for _, line := range strings.Split(infoTxt, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "role":
+			info.Role = val
+		case "master_link_status":
+			info.MasterLinkStatus = val
+		case "master_sync_in_progress":
+			n, _ := strconv.Atoi(val)
+			info.MasterSyncInProgress = n
+		case "master_repl_offset":
+			n, _ := strconv.ParseInt(val, 10, 64)
+			info.MasterReplOffset = n
+		case "slave_repl_offset":
+			n, _ := strconv.ParseInt(val, 10, 64)
+			info.SlaveReplOffset = n
+		}
+	}
+	return info
+}
+
 func TcpCheck(host, port string) bool {
 	// check tcp port
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 2*time.Second)
