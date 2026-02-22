@@ -808,6 +808,7 @@ func (r *ValkeyClusterReconciler) isValkeyClusterHealthy(ctx context.Context, va
 	}
 
 	// Confirm the Valkey cluster itself reports a healthy state.
+	clusterStateOK := false
 	for _, pod := range podList.Items {
 		if pod.Status.PodIP == "" {
 			continue
@@ -835,15 +836,71 @@ func (r *ValkeyClusterReconciler) isValkeyClusterHealthy(ctx context.Context, va
 					logger.Info("Valkey cluster state is not ok", "pod", pod.Name, "state", state)
 					return false, nil
 				}
-				return true, nil
+				clusterStateOK = true
+				break
 			}
 		}
-		// Only need to check one pod.
+		// Only need to check one pod for CLUSTER INFO.
 		break
 	}
 
-	logger.Info("Could not determine cluster_state from CLUSTER INFO")
-	return false, nil
+	if !clusterStateOK {
+		logger.Info("Could not determine cluster_state from CLUSTER INFO")
+		return false, nil
+	}
+
+	// Verify all replicas have caught up with their masters before declaring healthy.
+	// This prevents the rolling update from deleting the next pod while a freshly
+	// restarted replica is still performing a full or partial resync.
+	const replicationOffsetTolerance int64 = 1024
+	for _, pod := range podList.Items {
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		valkeyClient, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
+		if err != nil {
+			logger.Error(err, "Failed to create Valkey client for replication check", "pod", pod.Name)
+			return false, err
+		}
+		defer valkeyClient.Close()
+
+		infoTxt, err := valkeyClient.Do(ctx, valkeyClient.B().Info().Section("replication").Build()).ToString()
+		if err != nil {
+			logger.Error(err, "Failed to get INFO REPLICATION", "pod", pod.Name)
+			return false, err
+		}
+
+		replInfo := internalValkey.ParseInfoReplication(infoTxt)
+		if replInfo.Role != "slave" {
+			continue
+		}
+
+		if replInfo.MasterLinkStatus != "up" {
+			logger.Info("Cluster unhealthy: replica master_link_status is not up",
+				"pod", pod.Name, "master_link_status", replInfo.MasterLinkStatus)
+			return false, nil
+		}
+		if replInfo.MasterSyncInProgress != 0 {
+			logger.Info("Cluster unhealthy: replica has full sync in progress",
+				"pod", pod.Name)
+			return false, nil
+		}
+		offsetLag := replInfo.MasterReplOffset - replInfo.SlaveReplOffset
+		if offsetLag < 0 {
+			offsetLag = -offsetLag
+		}
+		if offsetLag > replicationOffsetTolerance {
+			logger.Info("Cluster unhealthy: replica replication offset lag exceeds tolerance",
+				"pod", pod.Name,
+				"master_repl_offset", replInfo.MasterReplOffset,
+				"slave_repl_offset", replInfo.SlaveReplOffset,
+				"lag", offsetLag,
+				"tolerance", replicationOffsetTolerance)
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 func (r *ValkeyClusterReconciler) waitForPodsToBeAccessibleViaValkey(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (*ctrl.Result, error) {

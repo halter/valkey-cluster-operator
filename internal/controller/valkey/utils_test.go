@@ -379,3 +379,127 @@ func TestGenerateReshardingPlan(t *testing.T) {
 		assert.Equal(t, tt.plan, actual)
 	}
 }
+
+func TestParseInfoReplication(t *testing.T) {
+	testcases := []struct {
+		name string
+		in   string
+		out  ReplicationInfo
+	}{
+		{
+			name: "master node",
+			in: `# Replication
+role:master
+connected_slaves:2
+master_replid:abc123
+master_repl_offset:123456
+`,
+			out: ReplicationInfo{
+				Role:             "master",
+				MasterReplOffset: 123456,
+			},
+		},
+		{
+			name: "fully caught-up replica",
+			in: `# Replication
+role:slave
+master_link_status:up
+master_sync_in_progress:0
+master_repl_offset:123456
+slave_repl_offset:123456
+`,
+			out: ReplicationInfo{
+				Role:                 "slave",
+				MasterLinkStatus:     "up",
+				MasterSyncInProgress: 0,
+				MasterReplOffset:     123456,
+				SlaveReplOffset:      123456,
+			},
+		},
+		{
+			name: "replica with lag",
+			in: `# Replication
+role:slave
+master_link_status:up
+master_sync_in_progress:0
+master_repl_offset:200000
+slave_repl_offset:199000
+`,
+			out: ReplicationInfo{
+				Role:                 "slave",
+				MasterLinkStatus:     "up",
+				MasterSyncInProgress: 0,
+				MasterReplOffset:     200000,
+				SlaveReplOffset:      199000,
+			},
+		},
+		{
+			name: "full sync in progress",
+			in: `# Replication
+role:slave
+master_link_status:down
+master_sync_in_progress:1
+master_repl_offset:-1
+slave_repl_offset:0
+`,
+			out: ReplicationInfo{
+				Role:                 "slave",
+				MasterLinkStatus:     "down",
+				MasterSyncInProgress: 1,
+				MasterReplOffset:     -1,
+				SlaveReplOffset:      0,
+			},
+		},
+		{
+			name: "link down without sync",
+			in: `# Replication
+role:slave
+master_link_status:down
+master_sync_in_progress:0
+master_repl_offset:50000
+slave_repl_offset:50000
+`,
+			out: ReplicationInfo{
+				Role:                 "slave",
+				MasterLinkStatus:     "down",
+				MasterSyncInProgress: 0,
+				MasterReplOffset:     50000,
+				SlaveReplOffset:      50000,
+			},
+		},
+		{
+			name: "txt: prefix from valkey-go client",
+			in: `txt:# Replication
+role:slave
+master_link_status:up
+master_sync_in_progress:0
+master_repl_offset:999
+slave_repl_offset:999
+`,
+			out: ReplicationInfo{
+				Role:                 "slave",
+				MasterLinkStatus:     "up",
+				MasterSyncInProgress: 0,
+				MasterReplOffset:     999,
+				SlaveReplOffset:      999,
+			},
+		},
+		{
+			name: "carriage return handling",
+			in:   "# Replication\r\nrole:slave\r\nmaster_link_status:up\r\nmaster_sync_in_progress:0\r\nmaster_repl_offset:5000\r\nslave_repl_offset:5000\r\n",
+			out: ReplicationInfo{
+				Role:                 "slave",
+				MasterLinkStatus:     "up",
+				MasterSyncInProgress: 0,
+				MasterReplOffset:     5000,
+				SlaveReplOffset:      5000,
+			},
+		},
+	}
+	for _, tt := range testcases {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := ParseInfoReplication(tt.in)
+			assert.Equal(t, tt.out, actual)
+		})
+	}
+}
