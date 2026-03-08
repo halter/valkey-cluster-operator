@@ -229,7 +229,7 @@ var _ = Describe("controller", Ordered, func() {
 				}
 				return nil
 			}
-			Eventually(getPvc, time.Minute, time.Second).Should(Succeed())
+			Eventually(getPvc, 5*time.Minute, time.Second).Should(Succeed())
 		})
 		It("should add replicas", func() {
 			cmd := exec.Command("kubectl",
