@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -107,16 +108,29 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, valkeyClu
 }
 
 func getValkeyConfigContent(valkeyCluster *cachev1alpha1.ValkeyCluster) (string, error) {
-	if valkeyCluster.Spec.ValkeyConfig != nil && valkeyCluster.Spec.ValkeyConfig.RawConfig != "" {
-		return valkeyCluster.Spec.ValkeyConfig.RawConfig, nil
-	}
-	valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
-	if err != nil {
-		return "", err
-	}
-	if valkeyCluster.Spec.Password != "" {
-		valkeyConf = []byte(fmt.Sprintf("%[1]s\nrequirepass %[2]s\nprimaryauth %[2]s", string(valkeyConf), valkeyCluster.Spec.Password))
+	var base string
 
+	if valkeyCluster.Spec.ValkeyConfig != nil && valkeyCluster.Spec.ValkeyConfig.RawConfig != "" {
+		base = valkeyCluster.Spec.ValkeyConfig.RawConfig
+	} else {
+		valkeyConf, err := scripts.ReadFile("scripts/valkey.conf")
+		if err != nil {
+			return "", err
+		}
+		base = string(valkeyConf)
+		if valkeyCluster.Spec.Password != "" {
+			base = fmt.Sprintf("%s\nrequirepass %s\nprimaryauth %s", base, valkeyCluster.Spec.Password, valkeyCluster.Spec.Password)
+		}
 	}
-	return string(valkeyConf), nil
+
+	if valkeyCluster.Spec.ValkeyConfig == nil || len(valkeyCluster.Spec.ValkeyConfig.Parameters) == 0 {
+		return base, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(base)
+	for _, p := range valkeyCluster.Spec.ValkeyConfig.Parameters {
+		sb.WriteString(fmt.Sprintf("\n%s %s", p.Name, p.Value))
+	}
+	return sb.String(), nil
 }
