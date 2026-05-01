@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.1
+    controller-gen.kubebuilder.io/version: v0.16.4
   name: valkeyclusters.cache.halter.io
 spec:
   group: cache.halter.io
@@ -385,8 +385,34 @@ spec:
                 description: Overwrite the default operator-provided configuration
                   with user-defined config
                 properties:
+                  parameters:
+                    description: |-
+                      Parameters are valkey config directives appended after the operator-generated
+                      config (last-wins). Multiple entries with the same name are supported
+                      (e.g. multiple save directives). Values here override operator-set defaults
+                      including requirepass/primaryauth.
+                    items:
+                      description: ValkeyConfigParameter is a single valkey config
+                        directive with its value.
+                      properties:
+                        name:
+                          description: Name is the valkey config directive name (e.g.
+                            "maxmemory").
+                          type: string
+                        value:
+                          description: |-
+                            Value is the raw string that follows the directive name on the config line.
+                            Supports multi-argument directives (e.g. "900 1" for save) and quoted strings.
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
                   rawConfig:
-                    description: Raw valkey.conf content provided as a string
+                    description: |-
+                      Raw valkey.conf content provided as a string. Takes precedence as the config
+                      base; Parameters are still appended on top if both are set.
                     type: string
                 type: object
             type: object
