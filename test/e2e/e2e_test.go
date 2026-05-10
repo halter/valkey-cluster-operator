@@ -441,6 +441,47 @@ var _ = Describe("controller", Ordered, func() {
 			}
 			EventuallyWithOffset(1, verifyPVCResources, 3*time.Minute, 15*time.Second).Should(Succeed())
 		})
+		It("set config parameters", func() {
+			patchCmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				`-p=[{"op":"add","path":"/spec/valkeyConfig","value":{"parameters":[{"name":"maxmemory","value":"32mb"},{"name":"maxmemory-policy","value":"allkeys-lru"},{"name":"maxmemory-clients","value":"10mb"}]}}]`,
+			)
+			_, err := utils.Run(patchCmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+			verifyConfigMap := func() error {
+				cmd := exec.Command("kubectl", "get", "configmap",
+					"valkeycluster-sample",
+					"-o", `jsonpath={.data.valkey\.conf}`,
+					"-n", namespace,
+				)
+				cfgOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				for _, expected := range []string{
+					"maxmemory 32mb",
+					"maxmemory-policy allkeys-lru",
+					"maxmemory-clients 10mb",
+				} {
+					if !strings.Contains(string(cfgOutput), expected) {
+						return fmt.Errorf("expected configmap to contain %q but got: %s", expected, cfgOutput)
+					}
+				}
+				return nil
+			}
+			EventuallyWithOffset(1, verifyConfigMap, time.Minute, time.Second).Should(Succeed())
+
+			// Remove valkeyConfig so subsequent tests start from a clean state.
+			removeCmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				`-p=[{"op":"remove","path":"/spec/valkeyConfig"}]`,
+			)
+			_, err = utils.Run(removeCmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		})
 		It("apply custom rawConfig", func() {
 			Skip("skip raw config test")
 			customConfig := `port 6379

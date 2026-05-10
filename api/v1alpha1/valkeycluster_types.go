@@ -88,9 +88,25 @@ type ValkeyClusterSpec struct {
 	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
 }
 
+// ValkeyConfigParameter is a single valkey config directive with its value.
+type ValkeyConfigParameter struct {
+	// Name is the valkey config directive name (e.g. "maxmemory").
+	Name string `json:"name"`
+	// Value is the raw string that follows the directive name on the config line.
+	// Supports multi-argument directives (e.g. "900 1" for save) and quoted strings.
+	Value string `json:"value"`
+}
+
 type ValkeyConfig struct {
-	// Raw valkey.conf content provided as a string
+	// Raw valkey.conf content provided as a string. Takes precedence as the config
+	// base; Parameters are still appended on top if both are set.
 	RawConfig string `json:"rawConfig,omitempty"`
+
+	// Parameters are valkey config directives appended after the operator-generated
+	// config (last-wins). Multiple entries with the same name are supported
+	// (e.g. multiple save directives). Values here override operator-set defaults
+	// including requirepass/primaryauth.
+	Parameters []ValkeyConfigParameter `json:"parameters,omitempty"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster

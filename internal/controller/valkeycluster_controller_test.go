@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,6 +31,116 @@ import (
 
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
 )
+
+var _ = Describe("getValkeyConfigContent", func() {
+	param := func(name, value string) cachev1alpha1.ValkeyConfigParameter {
+		return cachev1alpha1.ValkeyConfigParameter{Name: name, Value: value}
+	}
+	cluster := func(password string, cfg *cachev1alpha1.ValkeyConfig) *cachev1alpha1.ValkeyCluster {
+		return &cachev1alpha1.ValkeyCluster{
+			Spec: cachev1alpha1.ValkeyClusterSpec{
+				Password:    password,
+				ValkeyConfig: cfg,
+			},
+		}
+	}
+
+	It("returns base config when no ValkeyConfig is set", func() {
+		out, err := getValkeyConfigContent(cluster("", nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("cluster-enabled yes"))
+		Expect(out).NotTo(ContainSubstring("maxmemory"))
+	})
+
+	It("appends a simple parameter after base config", func() {
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{param("maxmemory", "100mb")},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("cluster-enabled yes"))
+		Expect(out).To(ContainSubstring("\nmaxmemory 100mb"))
+	})
+
+	It("appends a multi-argument parameter", func() {
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{param("save", "900 1")},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("\nsave 900 1"))
+	})
+
+	It("appends a quoted value verbatim", func() {
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{param("requirepass", `"my secret"`)},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring(`requirepass "my secret"`))
+	})
+
+	It("appends multiple parameters in specified order", func() {
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{
+				param("maxmemory", "512mb"),
+				param("maxmemory-policy", "allkeys-lru"),
+				param("maxmemory-clients", "10mb"),
+			},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("\nmaxmemory 512mb"))
+		Expect(out).To(ContainSubstring("\nmaxmemory-policy allkeys-lru"))
+		Expect(out).To(ContainSubstring("\nmaxmemory-clients 10mb"))
+		// Order is preserved
+		maxIdx := strings.Index(out, "maxmemory 512mb")
+		policyIdx := strings.Index(out, "maxmemory-policy allkeys-lru")
+		clientsIdx := strings.Index(out, "maxmemory-clients 10mb")
+		Expect(maxIdx).To(BeNumerically("<", policyIdx))
+		Expect(policyIdx).To(BeNumerically("<", clientsIdx))
+	})
+
+	It("supports repeated keys for multi-value directives", func() {
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{
+				param("save", "900 1"),
+				param("save", "300 10"),
+			},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Count(out, "\nsave ")).To(Equal(2))
+		Expect(out).To(ContainSubstring("\nsave 900 1"))
+		Expect(out).To(ContainSubstring("\nsave 300 10"))
+		Expect(strings.Index(out, "save 900 1")).To(BeNumerically("<", strings.Index(out, "save 300 10")))
+	})
+
+	It("parameters override operator-injected password (last-wins)", func() {
+		out, err := getValkeyConfigContent(cluster("operatorpass", &cachev1alpha1.ValkeyConfig{
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{param("requirepass", "custom")},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		// Operator injects requirepass operatorpass; user param requirepass custom comes after
+		operatorIdx := strings.Index(out, "requirepass operatorpass")
+		userIdx := strings.Index(out, "requirepass custom")
+		Expect(operatorIdx).To(BeNumerically(">=", 0))
+		Expect(userIdx).To(BeNumerically(">", operatorIdx))
+	})
+
+	It("returns RawConfig verbatim when set", func() {
+		raw := "port 6379\ncluster-enabled yes\n"
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{RawConfig: raw}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(Equal(raw))
+	})
+
+	It("appends Parameters on top of RawConfig when both are set", func() {
+		raw := "port 6379\ncluster-enabled yes\n"
+		out, err := getValkeyConfigContent(cluster("", &cachev1alpha1.ValkeyConfig{
+			RawConfig:  raw,
+			Parameters: []cachev1alpha1.ValkeyConfigParameter{param("maxmemory", "64mb")},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(HavePrefix(raw))
+		Expect(out).To(ContainSubstring("\nmaxmemory 64mb"))
+	})
+})
 
 var _ = Describe("ValkeyCluster Controller", func() {
 	Context("When reconciling a resource", func() {
