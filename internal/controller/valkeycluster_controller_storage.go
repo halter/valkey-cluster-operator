@@ -176,6 +176,21 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 		}
 	}
 
+	// When the volumes can never expand there is no point measuring usage:
+	// record once that auto-scaling is unavailable and skip the per-pod execs
+	// entirely. The condition message is static so this does not generate
+	// repeated status updates or events.
+	allowsExpansion, scName, err := r.storageClassAllowsExpansion(ctx, &pvcList.Items[0])
+	if err != nil {
+		return nil, err
+	}
+	if !allowsExpansion {
+		return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
+			Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionTrue, Reason: "StorageClassNotExpandable",
+			Message: fmt.Sprintf("StorageClass %q does not allow volume expansion, disk auto-scaling is disabled", scName),
+		})
+	}
+
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList, listOpts...); err != nil {
 		return nil, err
@@ -198,7 +213,18 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 			maxUsedPercent = usedPercent
 		}
 	}
-	if !measured || maxUsedPercent < diskUsageThresholdPercent {
+	if !measured {
+		return nil, nil
+	}
+	if maxUsedPercent < diskUsageThresholdPercent {
+		// Clear a previously reported limit once usage recedes below the
+		// threshold (e.g. data was deleted or the limit-gated backlog cleared).
+		if cond := meta.FindStatusCondition(valkeyCluster.Status.Conditions, typeStorageLimitedValkeyCluster); cond != nil && cond.Status == metav1.ConditionTrue {
+			return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
+				Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionFalse, Reason: "BelowThreshold",
+				Message: fmt.Sprintf("Disk usage is below the %d%% expansion threshold", diskUsageThresholdPercent),
+			})
+		}
 		return nil, nil
 	}
 
@@ -207,22 +233,13 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 		next = *limit
 	}
 	if next.Cmp(desired) <= 0 {
+		// The message deliberately excludes the usage percentage so the
+		// condition (and its warning event) only refreshes when the limit or
+		// volume size changes, not every time usage drifts.
 		return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
 			Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionTrue, Reason: "StorageLimitReached",
-			Message: fmt.Sprintf("Disk usage is %d%% but volume size %s already reached spec.storageLimit %s",
-				maxUsedPercent, desired.String(), valkeyCluster.Spec.StorageLimit.String()),
-		})
-	}
-
-	allowsExpansion, scName, err := r.storageClassAllowsExpansion(ctx, &pvcList.Items[0])
-	if err != nil {
-		return nil, err
-	}
-	if !allowsExpansion {
-		return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
-			Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionTrue, Reason: "StorageClassNotExpandable",
-			Message: fmt.Sprintf("Disk usage is %d%% but StorageClass %q does not allow volume expansion",
-				maxUsedPercent, scName),
+			Message: fmt.Sprintf("Disk usage exceeds %d%% but volume size %s already reached spec.storageLimit %s",
+				diskUsageThresholdPercent, desired.String(), valkeyCluster.Spec.StorageLimit.String()),
 		})
 	}
 
@@ -248,8 +265,8 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 	return &ctrl.Result{Requeue: true}, nil
 }
 
-// setStorageLimitedCondition records why auto-scaling cannot proceed, emitting
-// a warning event only on transition to avoid spamming every poll.
+// setStorageLimitedCondition records whether auto-scaling can proceed, emitting
+// an event only on transition to avoid spamming every poll.
 func (r *ValkeyClusterReconciler) setStorageLimitedCondition(ctx context.Context, req ctrl.Request, valkeyCluster *cachev1alpha1.ValkeyCluster, condition metav1.Condition) error {
 	if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
 		return err
@@ -260,6 +277,10 @@ func (r *ValkeyClusterReconciler) setStorageLimitedCondition(ctx context.Context
 	if err := r.Status().Update(ctx, valkeyCluster); err != nil {
 		return err
 	}
-	r.Recorder.Event(valkeyCluster, "Warning", condition.Reason, condition.Message)
+	eventType := corev1.EventTypeWarning
+	if condition.Status == metav1.ConditionFalse {
+		eventType = corev1.EventTypeNormal
+	}
+	r.Recorder.Event(valkeyCluster, eventType, condition.Reason, condition.Message)
 	return nil
 }

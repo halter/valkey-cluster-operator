@@ -34,13 +34,15 @@ spec:
   storageLimit: 100Gi
 ```
 
-When the limit is reached (or the StorageClass does not allow volume
-expansion), the operator stops expanding, emits a warning event and sets the
-`StorageLimited` status condition.
+When the limit is reached, the operator stops expanding, emits a warning event
+and sets the `StorageLimited` status condition; the condition clears once usage
+drops back below the threshold or the limit is raised.
 
 Notes:
 - Volume expansion requires a StorageClass with `allowVolumeExpansion: true`
-  (for example AWS EBS gp3).
+  (for example AWS EBS gp3). On storage classes without it (such as kind's
+  local-path provisioner) the operator sets the `StorageLimited` condition once
+  and disables auto-scaling for the cluster, including the usage measurements.
 - AWS EBS allows one modification per volume per ~6 hours; the operator waits
   for an expansion to complete before requesting another one.
 
