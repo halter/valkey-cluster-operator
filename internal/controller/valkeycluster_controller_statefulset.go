@@ -278,11 +278,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 					Name:   "valkey-data",
 					Labels: ls,
 				},
-				Spec: corev1.PersistentVolumeClaimSpec{
-					AccessModes:      valkeyCluster.Spec.Storage.AccessModes,
-					StorageClassName: valkeyCluster.Spec.Storage.StorageClassName,
-					Resources:        valkeyCluster.Spec.Storage.Resources,
-				},
+				Spec: storagePVCSpec(valkeyCluster),
 			}},
 		},
 	}

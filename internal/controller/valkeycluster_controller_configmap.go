@@ -130,7 +130,7 @@ func getValkeyConfigContent(valkeyCluster *cachev1alpha1.ValkeyCluster) (string,
 	var sb strings.Builder
 	sb.WriteString(base)
 	for _, p := range valkeyCluster.Spec.ValkeyConfig.Parameters {
-		sb.WriteString(fmt.Sprintf("\n%s %s", p.Name, p.Value))
+		fmt.Fprintf(&sb, "\n%s %s", p.Name, p.Value)
 	}
 	return sb.String(), nil
 }

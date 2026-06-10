@@ -146,7 +146,11 @@ spec:
                 minimum: 1
                 type: integer
               storage:
-                description: Valkey pod storage
+                description: |-
+                  Valkey pod storage. Optional: when omitted the operator provisions volumes
+                  with the cluster default storage class and manages the size automatically,
+                  starting at 1Gi. When set, the requested size is the initial/minimum size;
+                  the operator still grows the volumes automatically as disk usage increases.
                 properties:
                   accessModes:
                     description: |-
@@ -342,6 +346,16 @@ spec:
                       backing this claim.
                     type: string
                 type: object
+              storageLimit:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  StorageLimit is the maximum per-node volume size the disk auto-scaler may
+                  grow to. When unset, growth is unbounded. When the limit is reached the
+                  operator stops expanding and reports the StorageLimited condition.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
               tolerations:
                 description: Tolerations
                 items:
@@ -499,6 +513,16 @@ spec:
                   - type
                   type: object
                 type: array
+              storageSize:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  StorageSize is the current per-node volume size managed by the disk
+                  auto-scaler. It only ever grows and is never smaller than the size
+                  requested in spec.storage.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
             type: object
         type: object
     served: true

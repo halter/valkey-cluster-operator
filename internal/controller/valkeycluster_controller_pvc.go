@@ -16,7 +16,7 @@ func (r *ValkeyClusterReconciler) persistentVolumeClaim(name string, valkeyClust
 			Namespace: valkeyCluster.Namespace,
 			Labels:    ls,
 		},
-		Spec: *valkeyCluster.Spec.Storage,
+		Spec: storagePVCSpec(valkeyCluster),
 	}
 	// Set the ownerRef for the PersistentVolumeClaim
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/

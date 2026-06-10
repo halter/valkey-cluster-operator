@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -51,9 +52,18 @@ type ValkeyClusterSpec struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Valkey pod storage
+	// Valkey pod storage. Optional: when omitted the operator provisions volumes
+	// with the cluster default storage class and manages the size automatically,
+	// starting at 1Gi. When set, the requested size is the initial/minimum size;
+	// the operator still grows the volumes automatically as disk usage increases.
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Storage *corev1.PersistentVolumeClaimSpec `json:"storage,omitempty"`
+
+	// StorageLimit is the maximum per-node volume size the disk auto-scaler may
+	// grow to. When unset, growth is unbounded. When the limit is reached the
+	// operator stops expanding and reports the StorageLimited condition.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	StorageLimit *resource.Quantity `json:"storageLimit,omitempty"`
 
 	// An optional field that specifies the minimum number of seconds for which a
 	// newly created Pod should be ready without any of its containers crashing, for
@@ -121,6 +131,12 @@ type ValkeyClusterStatus struct {
 	// Information about each pod
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	ClusterNodes map[string][]ValkeyClusterNode `json:"cluster_nodes,omitempty"`
+
+	// StorageSize is the current per-node volume size managed by the disk
+	// auto-scaler. It only ever grows and is never smaller than the size
+	// requested in spec.storage.
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	StorageSize *resource.Quantity `json:"storageSize,omitempty"`
 }
 
 type ValkeyClusterNode struct {
