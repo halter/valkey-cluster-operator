@@ -22,7 +22,7 @@ What is **NOT** implemented:
 You don't need to set a disk size. The operator provisions each node's data
 volume at 1Gi (or at `spec.storage.resources.requests.storage` if set, which
 acts as the initial/minimum size) and monitors disk usage of every pod by
-running `df` against the data mount once a minute. When the fullest volume in
+running `df` against the data mount every five minutes. When the fullest volume in
 the cluster goes above 50% used, the operator grows the target size for **all**
 volumes in the cluster by 50%, rounded up to a whole Gi. The current target
 size is tracked in `status.storageSize`; volumes only ever grow, never shrink.

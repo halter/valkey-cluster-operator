@@ -1336,7 +1336,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cachev1alpha1.ValkeyCluster{}).
 		Owns(&appsv1.StatefulSet{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 8}).
 		Complete(r)
 }
 

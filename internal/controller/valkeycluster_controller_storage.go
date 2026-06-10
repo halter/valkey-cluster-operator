@@ -39,8 +39,9 @@ const (
 	diskGrowthPercent = 50
 
 	// diskUsagePollInterval is how often a stable cluster is re-reconciled to
-	// measure disk usage.
-	diskUsagePollInterval = time.Minute
+	// measure disk usage. The 50% threshold with 50% growth steps leaves
+	// enough headroom that a five-minute detection latency is safe.
+	diskUsagePollInterval = 5 * time.Minute
 )
 
 const gibibyte = int64(1024 * 1024 * 1024)
