@@ -249,6 +249,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return *res, nil
 	}
 
+	// Live-apply auth settings before the rolling update so replication stays
+	// authenticated while pods restart with the new config file.
+	if err := r.reconcileAuth(ctx, valkeyCluster); err != nil {
+		log.Error(err, "Failed to reconcile auth config")
+		return ctrl.Result{}, err
+	}
+
 	// Check if we need to remove a shard
 	stsList := &appsv1.StatefulSetList{}
 	listOpts := []client.ListOption{
