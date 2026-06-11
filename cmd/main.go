@@ -120,7 +120,15 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// The reconciler fans out exec, valkey and status calls across every pod of
+	// every cluster, and the disk auto-scaler adds periodic polling on top; the
+	// default client-side rate limit (20 QPS / 30 burst) throttles reconciles
+	// under that load.
+	restConfig := ctrl.GetConfigOrDie()
+	restConfig.QPS = 50
+	restConfig.Burst = 100
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,

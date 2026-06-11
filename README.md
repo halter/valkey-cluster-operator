@@ -11,9 +11,40 @@ The operator provides the following features:
 - Scaling up and down the number of replicas per shard in the cluster
 - Resharding up and down, you can change the number of shards in a cluster and
 the Operator will handle resharding the slots for you.
+- Automatic disk scaling: disk usage is monitored and volumes grow on their own,
+so users don't need to think about disk sizes at all.
 
 What is **NOT** implemented:
 - Services. The only way to connect to the Valkey cluster is via the pod IP.
+
+## Disk auto-scaling
+
+You don't need to set a disk size. The operator provisions each node's data
+volume at 1Gi (or at `spec.storage.resources.requests.storage` if set, which
+acts as the initial/minimum size) and monitors disk usage of every pod by
+running `df` against the data mount every five minutes. When the fullest volume in
+the cluster goes above 50% used, the operator grows the target size for **all**
+volumes in the cluster by 50%, rounded up to a whole Gi. The current target
+size is tracked in `status.storageSize`; volumes only ever grow, never shrink.
+
+Optionally, `spec.storageLimit` caps the growth:
+
+```yaml
+spec:
+  storageLimit: 100Gi
+```
+
+When the limit is reached, the operator stops expanding, emits a warning event
+and sets the `StorageLimited` status condition; the condition clears once usage
+drops back below the threshold or the limit is raised.
+
+Notes:
+- Volume expansion requires a StorageClass with `allowVolumeExpansion: true`
+  (for example AWS EBS gp3). On storage classes without it (such as kind's
+  local-path provisioner) the operator sets the `StorageLimited` condition once
+  and disables auto-scaling for the cluster, including the usage measurements.
+- AWS EBS allows one modification per volume per ~6 hours; the operator waits
+  for an expansion to complete before requesting another one.
 
 ## Prerequisites
 

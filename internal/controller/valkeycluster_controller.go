@@ -68,6 +68,8 @@ const (
 	typeReshardingValkeyCluster = "Resharding"
 	// typeAvailableValkeyCluster represents the status of the Statefulset reconciliation
 	typeProvisioningValkeyCluster = "Provisioning"
+	// typeStorageLimitedValkeyCluster represents the status used when the disk auto-scaler cannot grow the volumes any further.
+	typeStorageLimitedValkeyCluster = "StorageLimited"
 )
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
@@ -88,6 +90,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
@@ -246,6 +249,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return *res, nil
 	}
 
+	// Live-apply auth settings before the rolling update so replication stays
+	// authenticated while pods restart with the new config file.
+	if err := r.reconcileAuth(ctx, valkeyCluster); err != nil {
+		log.Error(err, "Failed to reconcile auth config")
+		return ctrl.Result{}, err
+	}
+
 	// Check if we need to remove a shard
 	stsList := &appsv1.StatefulSetList{}
 	listOpts := []client.ListOption{
@@ -314,7 +324,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	// Monitor disk usage and grow the cluster-wide volume size when needed.
+	// The new target lands in status and is applied by the PVC check below.
+	res, err = r.reconcileDiskAutoScaling(ctx, req, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile disk auto-scaling")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
+	}
+
 	// check if pvs already exist, they should be created by the statefulset
+	desiredStorage := desiredStorageSize(valkeyCluster)
 	for stsIdx := 0; stsIdx < int(valkeyCluster.Spec.Shards); stsIdx++ {
 		for pvcIdx := 0; pvcIdx < int(statefulSetSize(valkeyCluster)); pvcIdx++ {
 			pvcName := fmt.Sprintf("valkey-data-%s-%d-%d", valkeyCluster.Name, stsIdx, pvcIdx)
@@ -329,8 +351,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				return ctrl.Result{}, err
 			}
 
-			if found.Spec.Resources.Requests.Storage().Cmp(*valkeyCluster.Spec.Storage.Resources.Requests.Storage()) == -1 {
-				found.Spec.Resources.Requests[corev1.ResourceStorage] = *valkeyCluster.Spec.Storage.Resources.Requests.Storage()
+			if found.Spec.Resources.Requests.Storage().Cmp(desiredStorage) == -1 {
+				found.Spec.Resources.Requests[corev1.ResourceStorage] = desiredStorage
 				if err = r.Update(ctx, found); err != nil {
 					log.Error(err, "Failed to update PersistentVolumeClaim",
 						"PersistentVolumeClaim.Namespace", found.Namespace, "PersistentVolumeClaim.Name", found.Name)
@@ -762,7 +784,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return *res, nil
 	}
 
-	return ctrl.Result{}, nil
+	// Requeue periodically so disk usage keeps being monitored while the
+	// cluster is otherwise stable.
+	return ctrl.Result{RequeueAfter: diskUsagePollInterval}, nil
 }
 
 // isValkeyClusterHealthy returns true only when every pod in the cluster is Running and Ready
@@ -1319,7 +1343,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cachev1alpha1.ValkeyCluster{}).
 		Owns(&appsv1.StatefulSet{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 8}).
 		Complete(r)
 }
 

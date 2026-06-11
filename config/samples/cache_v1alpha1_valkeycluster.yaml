@@ -19,13 +19,14 @@ spec:
     requests:
       cpu: "0.4"
       memory: 714Mi
+  # Disk size is managed automatically: volumes start at 1Gi and grow as disk
+  # usage increases. storage itself is optional and only needed to pick a
+  # storage class or access mode; storageLimit caps the automatic growth.
   storage:
     accessModes:
     - ReadWriteOnce
-    resources:
-      requests:
-        storage: 2Gi
     storageClassName: gp3
+  storageLimit: 100Gi
   tolerations:
   - effect: NoSchedule
     key: dedicated

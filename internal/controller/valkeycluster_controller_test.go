@@ -39,7 +39,7 @@ var _ = Describe("getValkeyConfigContent", func() {
 	cluster := func(password string, cfg *cachev1alpha1.ValkeyConfig) *cachev1alpha1.ValkeyCluster {
 		return &cachev1alpha1.ValkeyCluster{
 			Spec: cachev1alpha1.ValkeyClusterSpec{
-				Password:    password,
+				Password:     password,
 				ValkeyConfig: cfg,
 			},
 		}

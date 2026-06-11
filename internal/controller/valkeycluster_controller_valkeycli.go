@@ -24,8 +24,12 @@ func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCl
 	}
 
 	podName := fmt.Sprintf("%s-0-0", valkeyCluster.Name)
+	return r.execInPod(ctx, valkeyCluster.Namespace, podName, cmd)
+}
+
+func (r *ValkeyClusterReconciler) execInPod(ctx context.Context, namespace, podName string, cmd []string) (string, string, error) {
 	req := r.ClientSet.CoreV1().RESTClient().Post().Resource("pods").Name(podName).
-		Namespace(valkeyCluster.Namespace).SubResource("exec")
+		Namespace(namespace).SubResource("exec")
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: "valkey-cluster-node",
 		Command:   cmd,
@@ -36,7 +40,7 @@ func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCl
 	}, runtime.NewParameterCodec(r.Scheme))
 	exec, err := remotecommand.NewSPDYExecutor(r.RestConfig, "POST", req.URL())
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to execute valkey-cli %s: %w", strings.Join(args, " "), err)
+		return "", "", fmt.Errorf("Failed to execute %s: %w", strings.Join(cmd, " "), err)
 	}
 	var stdout, stderr bytes.Buffer
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
@@ -47,7 +51,7 @@ func (r *ValkeyClusterReconciler) executeValkeyCli(ctx context.Context, valkeyCl
 	stdoutStr := stdout.String()
 	stderrStr := stderr.String()
 	if err != nil {
-		return stdoutStr, stderrStr, fmt.Errorf("Failed executing command 'valkey-cli %s': stdout: %s, stderr: %s, err: %w", strings.Join(args, " "), stdoutStr, stderrStr, err)
+		return stdoutStr, stderrStr, fmt.Errorf("Failed executing command '%s': stdout: %s, stderr: %s, err: %w", strings.Join(cmd, " "), stdoutStr, stderrStr, err)
 	}
 	return stdoutStr, stderrStr, nil
 }

@@ -125,6 +125,11 @@ func (in *ValkeyClusterSpec) DeepCopyInto(out *ValkeyClusterSpec) {
 		*out = new(v1.PersistentVolumeClaimSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.StorageLimit != nil {
+		in, out := &in.StorageLimit, &out.StorageLimit
+		x := (*in).DeepCopy()
+		*out = &x
+	}
 	if in.Tolerations != nil {
 		in, out := &in.Tolerations, &out.Tolerations
 		*out = make([]v1.Toleration, len(*in))
@@ -181,6 +186,11 @@ func (in *ValkeyClusterStatus) DeepCopyInto(out *ValkeyClusterStatus) {
 			}
 			(*out)[key] = outVal
 		}
+	}
+	if in.StorageSize != nil {
+		in, out := &in.StorageSize, &out.StorageSize
+		x := (*in).DeepCopy()
+		*out = &x
 	}
 }
 

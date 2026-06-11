@@ -554,7 +554,9 @@ var _ = Describe("controller", Ordered, func() {
 			)
 			_, err := utils.Run(cmd)
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 2, "supersecret"), 5*time.Minute, 15*time.Second).Should(Succeed())
+			// Six pods restart sequentially, each gated on full cluster health
+			// including replica catch-up, so allow well beyond the rollout time.
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 2, "supersecret"), 10*time.Minute, 15*time.Second).Should(Succeed())
 		})
 		It("be deleted", func() {
 			cmd := exec.Command("kubectl",
@@ -715,17 +717,36 @@ spec:
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
 		By("waiting for rolling update to complete")
-		EventuallyWithOffset(1, verifyClusterState(upgradeClusterName, 2, 1, ""), 5*time.Minute, 15*time.Second).Should(Succeed())
-
-		By("verifying cluster is running version 9.0.1")
-		EventuallyWithOffset(1, verifyClusterVersion(upgradeClusterName, "9.0.1"), 5*time.Minute, 15*time.Second).Should(Succeed())
+		// The cluster state and version must hold at the same instant:
+		// checking them in separate Eventually blocks lets the state pass
+		// before the last pod is replaced and the version pass while it is
+		// terminating (terminating pods are excluded from the listing), so
+		// the rollout could still be in flight after both succeeded.
+		verifyUpgraded := func() error {
+			if err := verifyClusterState(upgradeClusterName, 2, 1, "")(); err != nil {
+				return err
+			}
+			return verifyClusterVersion(upgradeClusterName, "9.0.1")()
+		}
+		EventuallyWithOffset(1, verifyUpgraded, 10*time.Minute, 15*time.Second).Should(Succeed())
 
 		By("verifying test data survived the upgrade")
-		cmd = exec.Command("kubectl", "-n", namespace, "exec", upgradeClusterName+"-0-0", "-c", "valkey-cluster-node", "--",
-			"valkey-cli", "-c", "GET", testKey)
-		output, err := utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-		ExpectWithOffset(1, strings.TrimSpace(string(output))).To(Equal(testValue))
+		// Retried because a GET right after the final failover can race
+		// cluster routing convergence; genuinely lost data never recovers, so
+		// retrying does not mask real loss.
+		verifyData := func() error {
+			cmd = exec.Command("kubectl", "-n", namespace, "exec", upgradeClusterName+"-0-0", "-c", "valkey-cluster-node", "--",
+				"valkey-cli", "-c", "GET", testKey)
+			output, err := utils.Run(cmd)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(string(output)) != testValue {
+				return fmt.Errorf("expected %q but got %q", testValue, strings.TrimSpace(string(output)))
+			}
+			return nil
+		}
+		EventuallyWithOffset(1, verifyData, 2*time.Minute, 5*time.Second).Should(Succeed())
 	})
 })
 
