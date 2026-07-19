@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"strings"
@@ -26,7 +27,7 @@ func (r *ValkeyClusterReconciler) executeValkeyCliJob(ctx context.Context, valke
 	logger := log.FromContext(ctx)
 
 	// Generate unique job name based on timestamp and operation
-	jobName := fmt.Sprintf("%s-valkey-cli-%d", valkeyCluster.Name, time.Now().Unix())
+	jobName := valkeyCliJobName(valkeyCluster.Name, time.Now().Unix())
 
 	// Create the Job
 	job := r.buildValkeyCliJob(jobName, valkeyCluster, args)
@@ -50,6 +51,25 @@ func (r *ValkeyClusterReconciler) executeValkeyCliJob(ctx context.Context, valke
 	}
 
 	return stdout, stderr, err
+}
+
+// maxJobNameLength caps Job names at 63 characters: Kubernetes copies the Job
+// name into the job-name label on the Job's pods, and label values are limited
+// to 63 characters.
+const maxJobNameLength = 63
+
+// valkeyCliJobName returns "<cluster>-valkey-cli-<timestamp>", truncating long
+// cluster names and appending a short hash of the full name so that names stay
+// unique across clusters that share a truncated prefix.
+func valkeyCliJobName(clusterName string, timestamp int64) string {
+	suffix := fmt.Sprintf("-valkey-cli-%d", timestamp)
+	maxPrefix := maxJobNameLength - len(suffix)
+	if len(clusterName) <= maxPrefix {
+		return clusterName + suffix
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(clusterName)))[:8]
+	prefix := strings.TrimRight(clusterName[:maxPrefix-len(hash)-1], "-")
+	return fmt.Sprintf("%s-%s%s", prefix, hash, suffix)
 }
 
 // buildValkeyCliJob creates a Job spec for running valkey-cli commands
