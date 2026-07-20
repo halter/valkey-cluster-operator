@@ -109,9 +109,8 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 					},
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "valkey-cluster-operator-valkey-pod",
-					NodeSelector:       valkeyCluster.Spec.NodeSelector,
-					Tolerations:        valkeyCluster.Spec.Tolerations,
+					NodeSelector: valkeyCluster.Spec.NodeSelector,
+					Tolerations:  valkeyCluster.Spec.Tolerations,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &[]bool{true}[0],
 						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
@@ -182,7 +181,10 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								TimeoutSeconds:   5,
 								PeriodSeconds:    10,
 								SuccessThreshold: 1,
-								FailureThreshold: 30,
+								// The script fails open once uptime exceeds 300s, so this
+								// threshold (40 * 10s = 400s) must stay comfortably above it
+								// to avoid kubelet restarting the container first.
+								FailureThreshold: 40,
 							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -563,6 +565,7 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 		ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
 		ss.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
 		ss.Spec.Template.Spec.Containers[0].StartupProbe = desired.Spec.Template.Spec.Containers[0].StartupProbe
+		ss.Spec.Template.Spec.Containers[0].ReadinessProbe = desired.Spec.Template.Spec.Containers[0].ReadinessProbe
 
 		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
 		ss.Spec.Template.Spec.Containers[1].Image = desired.Spec.Template.Spec.Containers[1].Image
