@@ -237,32 +237,30 @@ func GenerateReshardingPlan(clusterNodesForShard map[int][]*ClusterNode, desired
 		}
 	}
 
-	desiredSlotCounts := SlotCounts(int(desiredShards))
-	actualSlotCounts := []int{}
+	desiredSlotCounts := SlotCounts(desiredShards)
 	maxIdx := 0
 	for idx := range clusterNodesForShard {
 		if idx > maxIdx {
 			maxIdx = idx
 		}
 	}
+	// One entry per shard index so counts stay aligned with primaries,
+	// including shards whose primary currently holds no slots.
+	actualSlotCounts := make([]int, 0, maxIdx+1)
 	for i := 0; i <= maxIdx; i++ {
-		for _, cn := range clusterNodesForShard[i] {
-			if cn.IsMaster() && cn.HasSlots() {
-				actualSlotCounts = append(actualSlotCounts, cn.SlotCount())
-			}
+		if primary, ok := primaries[i]; ok {
+			actualSlotCounts = append(actualSlotCounts, primary.SlotCount())
+		} else {
+			actualSlotCounts = append(actualSlotCounts, 0)
 		}
 	}
 
 	// pad with 0s
-	if len(desiredSlotCounts) < len(actualSlotCounts) {
-		for i := 0; i < len(actualSlotCounts)-len(desiredSlotCounts); i++ {
-			desiredSlotCounts = append(desiredSlotCounts, 0)
-		}
+	for len(desiredSlotCounts) < len(actualSlotCounts) {
+		desiredSlotCounts = append(desiredSlotCounts, 0)
 	}
-	if len(desiredSlotCounts) > len(actualSlotCounts) {
-		for i := 0; i < len(desiredSlotCounts)-len(actualSlotCounts); i++ {
-			actualSlotCounts = append(actualSlotCounts, 0)
-		}
+	for len(actualSlotCounts) < len(desiredSlotCounts) {
+		actualSlotCounts = append(actualSlotCounts, 0)
 	}
 
 	sum := 0
@@ -285,39 +283,49 @@ func GenerateReshardingPlan(clusterNodesForShard map[int][]*ClusterNode, desired
 	receive := map[string]int{}
 	for i := range actualSlotCounts {
 		if actualSlotCounts[i] == desiredSlotCounts[i] {
-			//all is well
-		} else if actualSlotCounts[i] > desiredSlotCounts[i] {
+			// all is well
+			continue
+		}
+		primary, ok := primaries[i]
+		if !ok {
+			return nil, fmt.Errorf("no primary node found for shard %d", i)
+		}
+		if actualSlotCounts[i] > desiredSlotCounts[i] {
 			// need to get rid of:
-			delta := actualSlotCounts[i] - desiredSlotCounts[i]
-			rid[primaries[i].ID] = delta
-
-		} else if actualSlotCounts[i] < desiredSlotCounts[i] {
+			rid[primary.ID] = actualSlotCounts[i] - desiredSlotCounts[i]
+		} else {
 			// need to get:
-			delta := desiredSlotCounts[i] - actualSlotCounts[i]
-			receive[primaries[i].ID] = delta
+			receive[primary.ID] = desiredSlotCounts[i] - actualSlotCounts[i]
 		}
 	}
 
-	for fromID := range rid {
-		if rid[fromID] == 0 {
-			continue
-		}
-		for toID, receiveSlots := range receive {
-			if receiveSlots <= rid[fromID] {
-				actionPlan = append(actionPlan, Reshard{
-					FromID: fromID,
-					ToID:   toID,
-					Slots:  receiveSlots,
-				})
-				rid[fromID] = rid[fromID] - receiveSlots
-			} else {
-				actionPlan = append(actionPlan, Reshard{
-					FromID: fromID,
-					ToID:   toID,
-					Slots:  rid[fromID],
-				})
-				rid[fromID] = 0
+	donorIDs := make([]string, 0, len(rid))
+	for id := range rid {
+		donorIDs = append(donorIDs, id)
+	}
+	sort.Strings(donorIDs)
+	receiverIDs := make([]string, 0, len(receive))
+	for id := range receive {
+		receiverIDs = append(receiverIDs, id)
+	}
+	sort.Strings(receiverIDs)
+
+	for _, fromID := range donorIDs {
+		for _, toID := range receiverIDs {
+			if rid[fromID] == 0 {
+				break
 			}
+			if receive[toID] == 0 {
+				continue
+			}
+			slots := min(rid[fromID], receive[toID])
+			actionPlan = append(actionPlan, Reshard{
+				FromID: fromID,
+				ToID:   toID,
+				Slots:  slots,
+			})
+			rid[fromID] -= slots
+			receive[toID] -= slots
 		}
 	}
 
