@@ -71,6 +71,14 @@ func (m *ValkeyJobManager) getTargetPodAddress(ctx context.Context, valkeyCluste
 func (m *ValkeyJobManager) ReshardSlots(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, fromNodeID, toNodeID string, slotCount int) error {
 	logger := log.FromContext(ctx)
 
+	if slotCount <= 0 {
+		logger.Info("Skipping reshard with non-positive slot count",
+			"fromNodeID", fromNodeID,
+			"toNodeID", toNodeID,
+			"slotCount", slotCount)
+		return nil
+	}
+
 	logger.Info("Starting slot resharding via Job",
 		"fromNodeID", fromNodeID,
 		"toNodeID", toNodeID,

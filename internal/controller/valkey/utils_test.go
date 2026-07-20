@@ -372,6 +372,72 @@ func TestGenerateReshardingPlan(t *testing.T) {
 				},
 			},
 		},
+		{
+			// Two donors and two receivers with uneven slot counts. The first
+			// donor drains before all receivers are satisfied, which used to
+			// produce zero-slot reshard steps and over-ship slots to the
+			// first receiver because satisfied receivers were never removed.
+			clusterNodesForShard: map[int][]*ClusterNode{
+				0: []*ClusterNode{
+					{
+						Pod:          "keyval-0-0",
+						IP:           "10.0.0.1",
+						ID:           "00000000000000000000",
+						MasterNodeID: "",
+						Flags:        []string{"master"},
+						SlotRanges:   []*ClusterSlotRange{{0, 7999}},
+					},
+				},
+				1: []*ClusterNode{
+					{
+						Pod:          "keyval-1-0",
+						IP:           "10.0.1.1",
+						ID:           "55555555555555555555",
+						MasterNodeID: "",
+						Flags:        []string{"master"},
+						SlotRanges:   []*ClusterSlotRange{{8000, 16383}},
+					},
+				},
+				2: []*ClusterNode{
+					{
+						Pod:          "keyval-2-0",
+						IP:           "10.0.2.1",
+						ID:           "99999999999999999999",
+						MasterNodeID: "",
+						Flags:        []string{"master"},
+						SlotRanges:   []*ClusterSlotRange{},
+					},
+				},
+				3: []*ClusterNode{
+					{
+						Pod:          "keyval-3-0",
+						IP:           "10.0.3.1",
+						ID:           "aaaaaaaaaaaaaaaaaaaa",
+						MasterNodeID: "",
+						Flags:        []string{"master"},
+						SlotRanges:   []*ClusterSlotRange{},
+					},
+				},
+			},
+			desiredShards: 4,
+			plan: []Reshard{
+				{
+					FromID: "00000000000000000000",
+					ToID:   "99999999999999999999",
+					Slots:  3904,
+				},
+				{
+					FromID: "55555555555555555555",
+					ToID:   "99999999999999999999",
+					Slots:  192,
+				},
+				{
+					FromID: "55555555555555555555",
+					ToID:   "aaaaaaaaaaaaaaaaaaaa",
+					Slots:  4096,
+				},
+			},
+		},
 	}
 	for _, tt := range testcases {
 		actual, err := GenerateReshardingPlan(tt.clusterNodesForShard, tt.desiredShards)
