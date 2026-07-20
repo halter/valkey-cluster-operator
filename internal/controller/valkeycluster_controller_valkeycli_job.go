@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -21,10 +22,36 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// errValkeyCliJobStillRunning indicates a valkey-cli Job is still running: either
+// the Job this call created outlived the wait timeout, or a Job left behind by a
+// previous reconcile has not finished yet. The Job is intentionally left running —
+// deleting it would kill valkey-cli mid-operation (e.g. a slot migration) and leave
+// the cluster with stuck slots. Callers should requeue and let a later reconcile
+// pick up from wherever the Job got to.
+var errValkeyCliJobStillRunning = errors.New("valkey-cli Job is still running")
+
 // executeValkeyCliJob runs a valkey-cli command using a Kubernetes Job instead of exec.
 // This approach is more debuggable and doesn't consume resources on the valkey pods.
+//
+// Only one valkey-cli Job is allowed per cluster at a time: concurrent jobs could
+// race each other (e.g. a "--cluster fix" running against a live "--cluster reshard").
+// If a Job from a previous reconcile is still running, this returns
+// errValkeyCliJobStillRunning without creating a new Job.
 func (r *ValkeyClusterReconciler) executeValkeyCliJob(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, args []string) (string, string, error) {
 	logger := log.FromContext(ctx)
+
+	// Don't start a competing Job while one is still running for this cluster
+	// (reaping any finished leftovers from previous reconciles on the way).
+	running, err := r.settleValkeyCliJobs(ctx, valkeyCluster, logger)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to check for running valkey-cli Jobs: %w", err)
+	}
+	if running != nil {
+		logger.Info("A valkey-cli Job for this cluster is still running, not creating another",
+			"runningJobName", running.Name,
+			"args", args)
+		return "", "", fmt.Errorf("%w: %s", errValkeyCliJobStillRunning, running.Name)
+	}
 
 	// Generate unique job name based on timestamp and operation
 	jobName := valkeyCliJobName(valkeyCluster.Name, time.Now().Unix())
@@ -43,6 +70,17 @@ func (r *ValkeyClusterReconciler) executeValkeyCliJob(ctx context.Context, valke
 	// Wait for Job to complete
 	stdout, stderr, err := r.waitForJobCompletion(ctx, valkeyCluster.Namespace, jobName, logger)
 
+	// If the Job is still running (wait timed out) or we can no longer tell
+	// (context cancelled, e.g. operator shutdown), leave it alone: deleting it
+	// would kill valkey-cli mid-operation. A later reconcile adopts or reaps it
+	// via settleValkeyCliJobs.
+	if errors.Is(err, errValkeyCliJobStillRunning) || ctx.Err() != nil {
+		logger.Info("Leaving valkey-cli Job running for a later reconcile to pick up",
+			"jobName", jobName,
+			"error", err)
+		return stdout, stderr, err
+	}
+
 	// Clean up the Job (best effort, don't fail if cleanup fails)
 	if cleanupErr := r.deleteJob(ctx, valkeyCluster.Namespace, jobName, logger); cleanupErr != nil {
 		logger.Info("Failed to cleanup Job (non-fatal)",
@@ -51,6 +89,77 @@ func (r *ValkeyClusterReconciler) executeValkeyCliJob(ctx context.Context, valke
 	}
 
 	return stdout, stderr, err
+}
+
+// valkeyCliJobLabels returns the labels applied to valkey-cli Jobs for the given
+// cluster, also used to find them again on later reconciles.
+func valkeyCliJobLabels(clusterName string) map[string]string {
+	return map[string]string{
+		"app":      "valkey-cluster-operator",
+		"cluster":  clusterName,
+		"job-type": "valkey-cli",
+	}
+}
+
+// isJobFinished reports whether a Job has run to completion (successfully or not).
+func isJobFinished(job *batchv1.Job) bool {
+	return job.Status.Succeeded > 0 || job.Status.Failed > 0
+}
+
+// leftoverJobLogTailBytes caps how much of a leftover Job's output is copied into
+// the operator's own log. Reshard Jobs that outlived the wait are exactly the ones
+// with large output, and the tail is what shows how the operation ended.
+const leftoverJobLogTailBytes = 4096
+
+// settleValkeyCliJobs looks for valkey-cli Jobs left behind by previous reconciles
+// (jobs that outlived waitForJobCompletion's timeout, or that were running when the
+// operator restarted). Finished leftovers have their output logged and are deleted.
+// If a leftover Job is still running it is returned so the caller can requeue and
+// wait for it instead of starting competing cluster operations.
+func (r *ValkeyClusterReconciler) settleValkeyCliJobs(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, logger logr.Logger) (*batchv1.Job, error) {
+	jobList := &batchv1.JobList{}
+	err := r.List(ctx, jobList,
+		client.InNamespace(valkeyCluster.Namespace),
+		client.MatchingLabels(valkeyCliJobLabels(valkeyCluster.Name)))
+	if err != nil {
+		return nil, fmt.Errorf("Failed to list valkey-cli Jobs: %w", err)
+	}
+
+	var running *batchv1.Job
+	for i := range jobList.Items {
+		job := &jobList.Items[i]
+		if !isJobFinished(job) {
+			logger.Info("Found valkey-cli Job from a previous reconcile that is still running",
+				"jobName", job.Name)
+			running = job
+			continue
+		}
+
+		// Finished leftover: capture its output for debugging, then reap it.
+		stdout, _, logsErr := r.getJobLogs(ctx, valkeyCluster.Namespace, job.Name, logger)
+		if logsErr != nil {
+			logger.Info("Could not retrieve logs from finished leftover valkey-cli Job (non-fatal)",
+				"jobName", job.Name,
+				"error", logsErr)
+		}
+		if len(stdout) > leftoverJobLogTailBytes {
+			stdout = "(truncated)..." + stdout[len(stdout)-leftoverJobLogTailBytes:]
+		}
+		logger.Info("Reaping finished valkey-cli Job from a previous reconcile",
+			"jobName", job.Name,
+			"succeeded", job.Status.Succeeded,
+			"failed", job.Status.Failed,
+			"stdout", stdout)
+		if job.DeletionTimestamp == nil {
+			if err := r.deleteJob(ctx, valkeyCluster.Namespace, job.Name, logger); err != nil {
+				logger.Info("Failed to delete finished leftover valkey-cli Job (non-fatal)",
+					"jobName", job.Name,
+					"error", err)
+			}
+		}
+	}
+
+	return running, nil
 }
 
 // maxJobNameLength caps Job names at 63 characters: Kubernetes copies the Job
@@ -91,22 +200,14 @@ func (r *ValkeyClusterReconciler) buildValkeyCliJob(jobName string, valkeyCluste
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: valkeyCluster.Namespace,
-			Labels: map[string]string{
-				"app":      "valkey-cluster-operator",
-				"cluster":  valkeyCluster.Name,
-				"job-type": "valkey-cli",
-			},
+			Labels:    valkeyCliJobLabels(valkeyCluster.Name),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoffLimit,
 			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":      "valkey-cluster-operator",
-						"cluster":  valkeyCluster.Name,
-						"job-type": "valkey-cli",
-					},
+					Labels: valkeyCliJobLabels(valkeyCluster.Name),
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
@@ -140,7 +241,12 @@ func (r *ValkeyClusterReconciler) buildValkeyCliJob(jobName string, valkeyCluste
 	return job
 }
 
-// waitForJobCompletion waits for a Job to complete and returns its output
+// waitForJobCompletion waits for a Job to complete and returns its output.
+//
+// The timeout bounds how long a single reconcile blocks on the Job, not how long
+// the Job may run: on timeout this returns errValkeyCliJobStillRunning and the
+// Job keeps running. Long operations (e.g. reshard steps migrating large keyspaces)
+// are picked up again by later reconciles via settleValkeyCliJobs.
 func (r *ValkeyClusterReconciler) waitForJobCompletion(ctx context.Context, namespace, jobName string, logger logr.Logger) (string, string, error) {
 	timeout := 5 * time.Minute // Reduced timeout to avoid test timeouts
 	pollInterval := 2 * time.Second
@@ -148,7 +254,7 @@ func (r *ValkeyClusterReconciler) waitForJobCompletion(ctx context.Context, name
 
 	for {
 		if time.Now().After(deadline) {
-			return "", "", fmt.Errorf("Timeout waiting for Job %s to complete after %v", jobName, timeout)
+			return "", "", fmt.Errorf("%w: gave up waiting for Job %s after %v", errValkeyCliJobStillRunning, jobName, timeout)
 		}
 
 		// Get the Job
@@ -165,12 +271,12 @@ func (r *ValkeyClusterReconciler) waitForJobCompletion(ctx context.Context, name
 		}
 
 		// Check if Job completed
-		if job.Status.Succeeded > 0 {
-			logger.Info("Job completed successfully", "jobName", jobName)
-			return r.getJobLogs(ctx, namespace, jobName, logger)
-		}
+		if isJobFinished(job) {
+			if job.Status.Succeeded > 0 {
+				logger.Info("Job completed successfully", "jobName", jobName)
+				return r.getJobLogs(ctx, namespace, jobName, logger)
+			}
 
-		if job.Status.Failed > 0 {
 			logger.Info("Job failed", "jobName", jobName)
 			stdout, stderr, _ := r.getJobLogs(ctx, namespace, jobName, logger)
 			return stdout, stderr, fmt.Errorf("Job %s failed", jobName)

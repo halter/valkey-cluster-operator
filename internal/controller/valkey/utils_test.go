@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSlotRanges(t *testing.T) {
@@ -443,6 +444,53 @@ func TestGenerateReshardingPlan(t *testing.T) {
 		actual, err := GenerateReshardingPlan(tt.clusterNodesForShard, tt.desiredShards)
 		assert.NoError(t, err)
 		assert.Equal(t, tt.plan, actual)
+	}
+}
+
+func TestGenerateReshardingPlanMigrationInFlight(t *testing.T) {
+	master := func(pod, id string, slotRanges ...*ClusterSlotRange) []*ClusterNode {
+		return []*ClusterNode{
+			{
+				Pod:        pod,
+				ID:         id,
+				Flags:      []string{"master"},
+				SlotRanges: slotRanges,
+			},
+		}
+	}
+
+	testcases := []struct {
+		name                 string
+		clusterNodesForShard map[int][]*ClusterNode
+		desiredShards        int
+	}{
+		{
+			// While a slot migrates, the importing primary can already claim it
+			// in its own CLUSTER NODES view before the donor releases it, so the
+			// per-shard counts sum to 16385.
+			name: "double counted slot during migration",
+			clusterNodesForShard: map[int][]*ClusterNode{
+				0: master("keyval-0-0", "00000000000000000000", &ClusterSlotRange{0, 8191}),
+				1: master("keyval-1-0", "55555555555555555555", &ClusterSlotRange{8191, 16383}),
+			},
+			desiredShards: 2,
+		},
+		{
+			// A slot can also transiently have no owner, summing to 16383.
+			name: "unowned slot during migration",
+			clusterNodesForShard: map[int][]*ClusterNode{
+				0: master("keyval-0-0", "00000000000000000000", &ClusterSlotRange{0, 8190}),
+				1: master("keyval-1-0", "55555555555555555555", &ClusterSlotRange{8192, 16383}),
+			},
+			desiredShards: 2,
+		},
+	}
+	for _, tt := range testcases {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := GenerateReshardingPlan(tt.clusterNodesForShard, tt.desiredShards)
+			require.ErrorIs(t, err, ErrSlotsMigrationInFlight)
+			assert.Nil(t, plan)
+		})
 	}
 }
 

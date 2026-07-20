@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -168,6 +169,13 @@ func (m *ValkeyJobManager) FixClusterSlots(ctx context.Context, valkeyCluster *c
 		"stderr", stderr)
 
 	if err != nil {
+		// The fix Job is still running (or another Job is): nothing has been
+		// verified yet, so surface that to the caller to requeue rather than
+		// running a concurrent check.
+		if errors.Is(err, errValkeyCliJobStillRunning) {
+			logger.Info("Fix Job is still running, caller should requeue and wait")
+			return err
+		}
 		// Check if the cluster is down during fix
 		if isClusterDown(stdout, stderr, err) {
 			logger.Info("Cluster is down during fix attempt, caller should retry")
@@ -262,6 +270,12 @@ func (m *ValkeyJobManager) FixStuckSlotsIfNeeded(ctx context.Context, valkeyClus
 	hasStuckSlots, checkErr := m.CheckForStuckSlots(ctx, valkeyCluster)
 
 	if checkErr != nil {
+		// The check could not run because a valkey-cli Job is still running, so
+		// we don't know whether slots are stuck. Propagate so the caller
+		// requeues and waits for the running Job instead.
+		if errors.Is(checkErr, errValkeyCliJobStillRunning) {
+			return false, checkErr
+		}
 		logger.Info("Check for stuck slots returned error",
 			"error", checkErr)
 	}
