@@ -217,7 +217,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// We may add the option to force a restart in future using the hash of the updated valkey config
+	// Config changes are applied to running pods by reconcileValkeyConfig
+	// below; directives that cannot be set at runtime are applied by a
+	// health-gated rolling restart (performConfigRestarts) onto this file.
 	_, err = r.upsertConfigMap(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to upsert configmap")
@@ -254,6 +256,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// authenticated while pods restart with the new config file.
 	if err := r.reconcileAuth(ctx, valkeyCluster); err != nil {
 		log.Error(err, "Failed to reconcile auth config")
+		return ctrl.Result{}, err
+	}
+
+	// Live-apply the managed config directives (spec.valkeyConfig) to running
+	// pods and collect any pods that need a restart for directives the server
+	// cannot set at runtime. The restarts themselves are driven at the end of
+	// the reconcile (performConfigRestarts), after any in-flight revision
+	// rollout has priority.
+	podsNeedingConfigRestart, err := r.reconcileValkeyConfig(ctx, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile valkey config")
 		return ctrl.Result{}, err
 	}
 
@@ -786,6 +799,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	res, err = r.performRollingUpdate(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to perform rolling update")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
+	}
+
+	// Restart pods whose runtime config cannot converge to spec via CONFIG SET
+	// (immutable directives), one pod at a time, gated on cluster health. Runs
+	// after performRollingUpdate so a revision rollout — which also restarts
+	// pods onto the current config file — always takes priority.
+	res, err = r.performConfigRestarts(ctx, valkeyCluster, podsNeedingConfigRestart)
+	if err != nil {
+		log.Error(err, "Failed to perform config restarts")
 		return ctrl.Result{}, err
 	}
 	if res != nil {

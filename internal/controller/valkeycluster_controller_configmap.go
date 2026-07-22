@@ -123,13 +123,17 @@ func getValkeyConfigContent(valkeyCluster *cachev1alpha1.ValkeyCluster) (string,
 		}
 	}
 
-	if valkeyCluster.Spec.ValkeyConfig == nil || len(valkeyCluster.Spec.ValkeyConfig.Parameters) == 0 {
+	// Operator-managed defaults followed by spec parameters, in the same
+	// order reconcileValkeyConfig live-applies them. Later lines win in
+	// valkey.conf, so spec parameters override the defaults.
+	entries := managedConfigEntries(valkeyCluster)
+	if len(entries) == 0 {
 		return base, nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString(base)
-	for _, p := range valkeyCluster.Spec.ValkeyConfig.Parameters {
+	for _, p := range entries {
 		fmt.Fprintf(&sb, "\n%s %s", p.Name, p.Value)
 	}
 	return sb.String(), nil
