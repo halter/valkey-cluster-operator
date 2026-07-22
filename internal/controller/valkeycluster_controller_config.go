@@ -114,19 +114,82 @@ func podMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster) int64 {
 
 // managedConfigEntries returns the ordered list of config directives the
 // operator actively manages on running pods: the operator-wide defaults
-// followed by the spec's valkeyConfig.parameters. Entries are applied in
-// order; for directives where the same name appears more than once (e.g.
-// client-output-buffer-limit once per client class), later entries win for
-// the class/value they address, matching valkey.conf semantics — so spec
-// parameters override the defaults. getValkeyConfigContent renders the same
-// entries in the same order into the config file, keeping the live-applied
-// state and the restart state identical.
+// followed by the spec's valkeyConfig.parameters. For directives where the
+// same name appears more than once (e.g. client-output-buffer-limit once per
+// client class), later entries win for the class/value they address,
+// matching valkey.conf semantics — so spec parameters override the defaults.
+// getValkeyConfigContent renders these entries in this order into the config
+// file (where the server applies last-line-wins at boot), and
+// reconcileValkeyConfig live-applies their effectiveManagedConfig collapse,
+// keeping the live-applied state and the restart state identical.
 func managedConfigEntries(valkeyCluster *cachev1alpha1.ValkeyCluster) []cachev1alpha1.ValkeyConfigParameter {
 	entries := managedDefaultParameters(valkeyCluster)
 	if valkeyCluster.Spec.ValkeyConfig != nil {
 		entries = append(entries, valkeyCluster.Spec.ValkeyConfig.Parameters...)
 	}
 	return entries
+}
+
+// effectiveManagedConfig collapses the ordered managed entries into a single
+// effective desired value per directive, later entries overriding earlier
+// ones — the state a pod restart would produce from the rendered config file
+// (last line wins in valkey.conf). The live-apply path must work on this
+// collapsed form: each raw entry is compared against a config snapshot taken
+// once per pod, so applying the raw list would flip a directive that appears
+// in both the defaults and the spec (e.g. an overridden repl-backlog-size)
+// between the two values on alternating reconciles, never settling.
+//
+// client-output-buffer-limit is merged per client class rather than replaced
+// wholesale, mirroring how one config-file line per class composes.
+func effectiveManagedConfig(entries []cachev1alpha1.ValkeyConfigParameter) []cachev1alpha1.ValkeyConfigParameter {
+	effective := make([]cachev1alpha1.ValkeyConfigParameter, 0, len(entries))
+	index := make(map[string]int, len(entries))
+	for _, e := range entries {
+		i, seen := index[e.Name]
+		if !seen {
+			index[e.Name] = len(effective)
+			effective = append(effective, e)
+			continue
+		}
+		if e.Name == "client-output-buffer-limit" {
+			effective[i].Value = mergeClientOutputBufferLimit(effective[i].Value, e.Value)
+			continue
+		}
+		effective[i].Value = e.Value
+	}
+	return effective
+}
+
+// mergeClientOutputBufferLimit overlays the classes present in the override
+// value onto the base value, keeping base classes the override does not
+// mention. If either value does not parse as "class hard soft seconds"
+// groups the override wins wholesale — the server will reject it and the
+// error surfaces through the rejected-directive path.
+func mergeClientOutputBufferLimit(base, override string) string {
+	baseFields := strings.Fields(base)
+	overrideFields := strings.Fields(override)
+	if len(overrideFields) == 0 || len(overrideFields)%4 != 0 || len(baseFields)%4 != 0 {
+		return override
+	}
+	var classOrder []string
+	classes := map[string][]string{}
+	for _, fields := range [][]string{baseFields, overrideFields} {
+		for i := 0; i+3 < len(fields); i += 4 {
+			class := strings.ToLower(fields[i])
+			if class == "slave" {
+				class = "replica"
+			}
+			if _, ok := classes[class]; !ok {
+				classOrder = append(classOrder, class)
+			}
+			classes[class] = fields[i+1 : i+4]
+		}
+	}
+	parts := make([]string, 0, len(classOrder))
+	for _, class := range classOrder {
+		parts = append(parts, class+" "+strings.Join(classes[class], " "))
+	}
+	return strings.Join(parts, " ")
 }
 
 // reconcileValkeyConfig live-applies the managed config directives to every
@@ -149,18 +212,14 @@ func managedConfigEntries(valkeyCluster *cachev1alpha1.ValkeyCluster) []cachev1a
 func (r *ValkeyClusterReconciler) reconcileValkeyConfig(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) ([]corev1.Pod, error) {
 	logger := log.FromContext(ctx)
 
-	entries := managedConfigEntries(valkeyCluster)
+	entries := effectiveManagedConfig(managedConfigEntries(valkeyCluster))
 	if len(entries) == 0 {
 		return nil, nil
 	}
 
 	names := make([]string, 0, len(entries))
-	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		if !seen[e.Name] {
-			seen[e.Name] = true
-			names = append(names, e.Name)
-		}
+		names = append(names, e.Name)
 	}
 
 	podList := &corev1.PodList{}
@@ -172,11 +231,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeyConfig(ctx context.Context, val
 		return nil, err
 	}
 
-	// Persistent conditions (unknown directives, rejected values, restart
-	// required) are aggregated and evented once per directive per reconcile
-	// rather than once per pod: client-go's event spam filter budgets by
-	// involved object, so per-pod repeats would starve the cluster's whole
-	// event stream.
+	// Everything evented here — successful applies included — is aggregated
+	// and evented once per directive per reconcile rather than once per pod:
+	// client-go's event spam filter budgets by involved object (burst of 25,
+	// refilling one per 5 minutes), so per-pod repeats (e.g. a fleet-defaults
+	// rollout touching every pod of a large cluster in one reconcile) would
+	// starve the cluster's whole event stream.
+	appliedDirectives := map[string]int{}
 	unknownDirectives := map[string]int{}
 	rejectedDirectives := map[string]string{}
 	restartDirectives := map[string]string{}
@@ -218,8 +279,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyConfig(ctx context.Context, val
 			if err == nil {
 				logger.Info("Applied config directive to running pod",
 					"pod", pod.Name, "directive", e.Name, "value", e.Value)
-				r.Recorder.Event(valkeyCluster, "Normal", "ConfigUpdated",
-					fmt.Sprintf("Applied %s to pod %s", e.Name, pod.Name))
+				appliedDirectives[e.Name]++
 				continue
 			}
 			if _, isServerErr := valkey.IsValkeyErr(err); isServerErr {
@@ -238,6 +298,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyConfig(ctx context.Context, val
 		}
 	}
 
+	for name, count := range appliedDirectives {
+		r.Recorder.Event(valkeyCluster, "Normal", "ConfigUpdated",
+			fmt.Sprintf("Applied %s to %d pod(s)", name, count))
+	}
 	for name, count := range unknownDirectives {
 		logger.Info("Skipping config directive unknown to running server",
 			"directive", name, "pods", count)

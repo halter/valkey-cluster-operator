@@ -251,6 +251,54 @@ var _ = Describe("managedConfigEntries", func() {
 	})
 })
 
+var _ = Describe("effectiveManagedConfig", func() {
+	It("keeps unique directives in order", func() {
+		entries := []cachev1alpha1.ValkeyConfigParameter{
+			{Name: "maxmemory", Value: "32mb"},
+			{Name: "maxmemory-policy", Value: "allkeys-lru"},
+		}
+		Expect(effectiveManagedConfig(entries)).To(Equal(entries))
+	})
+
+	It("collapses a duplicated directive to the later value at the earlier position", func() {
+		Expect(effectiveManagedConfig([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "repl-backlog-size", Value: "20578304"},
+			{Name: "maxmemory", Value: "32mb"},
+			{Name: "repl-backlog-size", Value: "16mb"},
+		})).To(Equal([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "repl-backlog-size", Value: "16mb"},
+			{Name: "maxmemory", Value: "32mb"},
+		}))
+	})
+
+	It("merges client-output-buffer-limit per class instead of replacing it", func() {
+		Expect(effectiveManagedConfig([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "client-output-buffer-limit", Value: "replica 164626432 82313216 120"},
+			{Name: "client-output-buffer-limit", Value: "pubsub 32mb 8mb 60"},
+		})).To(Equal([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "client-output-buffer-limit", Value: "replica 164626432 82313216 120 pubsub 32mb 8mb 60"},
+		}))
+	})
+
+	It("lets a spec class override the defaulted class, slave spelling included", func() {
+		Expect(effectiveManagedConfig([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "client-output-buffer-limit", Value: "replica 164626432 82313216 120"},
+			{Name: "client-output-buffer-limit", Value: "slave 2gb 1gb 60"},
+		})).To(Equal([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "client-output-buffer-limit", Value: "replica 2gb 1gb 60"},
+		}))
+	})
+
+	It("lets a malformed client-output-buffer-limit override win wholesale", func() {
+		Expect(effectiveManagedConfig([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "client-output-buffer-limit", Value: "replica 164626432 82313216 120"},
+			{Name: "client-output-buffer-limit", Value: "replica 100"},
+		})).To(Equal([]cachev1alpha1.ValkeyConfigParameter{
+			{Name: "client-output-buffer-limit", Value: "replica 100"},
+		}))
+	})
+})
+
 var _ = Describe("getValkeyConfigContent with managed defaults", func() {
 	It("renders defaults after the base config and before spec parameters", func() {
 		vc := &cachev1alpha1.ValkeyCluster{
