@@ -410,6 +410,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("Could not build cluster nodes: %w", err)
 	}
 
+	// Must run before slot assignment and replication setup, which both fight
+	// a dead node's slot ownership.
+	res, err = r.remediateDeadNodes(ctx, valkeyCluster, clusterNodes)
+	if err != nil {
+		log.Error(err, "Failed to remediate dead cluster nodes")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
+	}
+
 	// cluster meet
 	for _, clusterNodeA := range clusterNodes {
 		for _, clusterNodeB := range clusterNodes {

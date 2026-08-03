@@ -617,3 +617,49 @@ slave_repl_offset:999
 		})
 	}
 }
+
+func TestFindDeadNodes(t *testing.T) {
+	topologyTxt := `530e79a7306c62ce8edd1d1fd23ceb42f0b76529 10.9.0.118:6379@16379 master - 0 1747631314884 1 connected 8192-16383
+fd5a39e1e47b38d0cfabc11388fd7230c2c0f183 10.9.8.19:6379@16379 myself,master - 0 0 0 connected
+2ce359297f259ff422218053d9c38e8eee5ac3f6 10.9.15.190:6379@16379 master,fail - 1747631310000 1747631314000 2 connected 0-8191
+552b84fa4644cdb3dd963462378dc3805568c2ae 10.9.22.221:6379@16379 slave,fail 2ce359297f259ff422218053d9c38e8eee5ac3f6 1747631310000 1747631315388 2 connected
+64c28a06b360d40fc811eee290fd874fe08a140e 10.9.22.17:6379@16379 master,fail? - 0 1747631315000 7 connected
+`
+
+	topology, err := ParseClusterNodes(topologyTxt)
+	require.NoError(t, err)
+	require.Len(t, topology, 5)
+
+	t.Run("returns hard-failed nodes not backed by a live pod", func(t *testing.T) {
+		liveNodeIDs := map[string]bool{
+			"530e79a7306c62ce8edd1d1fd23ceb42f0b76529": true,
+			"fd5a39e1e47b38d0cfabc11388fd7230c2c0f183": true,
+		}
+		deadNodes := FindDeadNodes(topology, liveNodeIDs)
+		require.Len(t, deadNodes, 2)
+		assert.Equal(t, "2ce359297f259ff422218053d9c38e8eee5ac3f6", deadNodes[0].ID)
+		assert.True(t, deadNodes[0].HasSlots())
+		assert.Equal(t, 8192, deadNodes[0].SlotCount())
+		assert.Equal(t, "552b84fa4644cdb3dd963462378dc3805568c2ae", deadNodes[1].ID)
+		assert.False(t, deadNodes[1].HasSlots())
+	})
+
+	t.Run("does not report a fail-flagged node that a live pod answers for", func(t *testing.T) {
+		liveNodeIDs := map[string]bool{
+			"530e79a7306c62ce8edd1d1fd23ceb42f0b76529": true,
+			"fd5a39e1e47b38d0cfabc11388fd7230c2c0f183": true,
+			"2ce359297f259ff422218053d9c38e8eee5ac3f6": true,
+			"552b84fa4644cdb3dd963462378dc3805568c2ae": true,
+		}
+		deadNodes := FindDeadNodes(topology, liveNodeIDs)
+		assert.Empty(t, deadNodes)
+	})
+
+	t.Run("does not report unconfirmed fail? or healthy absent nodes", func(t *testing.T) {
+		deadNodes := FindDeadNodes(topology, map[string]bool{})
+		for _, dead := range deadNodes {
+			assert.True(t, dead.HasFlag("fail"), "node %s", dead.ID)
+		}
+		require.Len(t, deadNodes, 2)
+	})
+}

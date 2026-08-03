@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,12 +39,11 @@ func (c *ClusterNode) String() string {
 }
 
 func (c *ClusterNode) IsMaster() bool {
-	for _, flag := range c.Flags {
-		if flag == "master" {
-			return true
-		}
-	}
-	return false
+	return c.HasFlag("master")
+}
+
+func (c *ClusterNode) HasFlag(flag string) bool {
+	return slices.Contains(c.Flags, flag)
 }
 func (c *ClusterNode) HasSlots() bool {
 	count := SlotCount(c.SlotRanges)
@@ -126,6 +126,9 @@ func parseClusterNodeLine(line string) (*ClusterNode, error) {
 func ParseClusterNodes(clusterNodesTxt string) ([]*ClusterNode, error) {
 	result := make([]*ClusterNode, 0)
 	for _, line := range strings.Split(clusterNodesTxt, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		clusterNode, err := parseClusterNodeLine(line)
 		if err != nil {
 			return nil, err
@@ -133,6 +136,21 @@ func ParseClusterNodes(clusterNodesTxt string) ([]*ClusterNode, error) {
 		result = append(result, clusterNode)
 	}
 	return result, nil
+}
+
+// FindDeadNodes returns topology entries with the hard "fail" flag (not the
+// unconfirmed "fail?") whose ID is absent from liveNodeIDs.
+func FindDeadNodes(topology []*ClusterNode, liveNodeIDs map[string]bool) []*ClusterNode {
+	deadNodes := make([]*ClusterNode, 0)
+	for _, cn := range topology {
+		if liveNodeIDs[cn.ID] {
+			continue
+		}
+		if cn.HasFlag("fail") {
+			deadNodes = append(deadNodes, cn)
+		}
+	}
+	return deadNodes
 }
 
 func ParseClusterNode(clusterNodesTxt string) (*ClusterNode, error) {
