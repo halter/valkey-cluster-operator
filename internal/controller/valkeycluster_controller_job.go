@@ -157,9 +157,13 @@ func (m *ValkeyJobManager) FixClusterSlots(ctx context.Context, valkeyCluster *c
 		return fmt.Errorf("Failed to get target pod address: %w", err)
 	}
 
+	// --cluster-yes: fix prompts for confirmation when covering uncovered
+	// slots, and a Job pod has no stdin — without it valkey-cli blocks on the
+	// prompt forever.
 	args := []string{
 		"--cluster", "fix", targetAddress,
 		"--cluster-fix-with-unreachable-primaries",
+		"--cluster-yes",
 	}
 
 	stdout, stderr, err := m.reconciler.executeValkeyCliJob(ctx, valkeyCluster, args)
