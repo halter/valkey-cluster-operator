@@ -166,12 +166,12 @@ spec:
 		}
 		EventuallyWithOffset(1, verifyReplacement, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-		By("waiting for the operator to take over the dead node's slots and forget it")
-		EventuallyWithOffset(1, func() error {
-			return eventWithReasonExists(deadNodeClusterName, "DeadNodeSlotTakeover")
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		By("waiting for the operator to forget the dead node and restore slot coverage")
 		EventuallyWithOffset(1, func() error {
 			return eventWithReasonExists(deadNodeClusterName, "DeadNodeForgotten")
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		EventuallyWithOffset(1, func() error {
+			return eventWithReasonExists(deadNodeClusterName, "SlotCoverageRestored")
 		}, 3*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("waiting for the cluster to fully converge with the dead node gone")

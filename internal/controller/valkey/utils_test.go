@@ -663,3 +663,47 @@ fd5a39e1e47b38d0cfabc11388fd7230c2c0f183 10.9.8.19:6379@16379 myself,master - 0 
 		require.Len(t, deadNodes, 2)
 	})
 }
+
+func TestUncoveredSlotRanges(t *testing.T) {
+	view := func(ranges ...ClusterSlotRange) []*ClusterNode {
+		node := &ClusterNode{ID: "a", Flags: []string{"master"}}
+		for i := range ranges {
+			node.SlotRanges = append(node.SlotRanges, &ranges[i])
+		}
+		return []*ClusterNode{node}
+	}
+
+	t.Run("full coverage yields nothing", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{view(ClusterSlotRange{0, 16383})})
+		assert.Empty(t, got)
+	})
+
+	t.Run("returns the gap between covered ranges", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{view(ClusterSlotRange{0, 5460}, ClusterSlotRange{10922, 16383})})
+		require.Len(t, got, 1)
+		assert.Equal(t, 5461, got[0].Start)
+		assert.Equal(t, 10921, got[0].End)
+	})
+
+	t.Run("unions coverage across views", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{
+			view(ClusterSlotRange{0, 5460}),
+			view(ClusterSlotRange{5461, 16383}),
+		})
+		assert.Empty(t, got)
+	})
+
+	t.Run("returns multiple gaps including boundaries", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{view(ClusterSlotRange{1, 1}, ClusterSlotRange{3, 16382})})
+		require.Len(t, got, 3)
+		assert.Equal(t, &ClusterSlotRange{0, 0}, got[0])
+		assert.Equal(t, &ClusterSlotRange{2, 2}, got[1])
+		assert.Equal(t, &ClusterSlotRange{16383, 16383}, got[2])
+	})
+
+	t.Run("no views means everything is uncovered", func(t *testing.T) {
+		got := UncoveredSlotRanges(nil)
+		require.Len(t, got, 1)
+		assert.Equal(t, &ClusterSlotRange{0, 16383}, got[0])
+	})
+}

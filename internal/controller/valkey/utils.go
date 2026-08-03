@@ -153,6 +153,34 @@ func FindDeadNodes(topology []*ClusterNode, liveNodeIDs map[string]bool) []*Clus
 	return deadNodes
 }
 
+// UncoveredSlotRanges returns the slots no entry of any view claims.
+func UncoveredSlotRanges(views [][]*ClusterNode) []*ClusterSlotRange {
+	covered := make([]bool, 16384)
+	for _, view := range views {
+		for _, cn := range view {
+			for _, sr := range cn.SlotRanges {
+				for slot := sr.Start; slot <= sr.End && slot < 16384; slot++ {
+					if slot >= 0 {
+						covered[slot] = true
+					}
+				}
+			}
+		}
+	}
+	uncovered := make([]*ClusterSlotRange, 0)
+	for slot := 0; slot < 16384; slot++ {
+		if covered[slot] {
+			continue
+		}
+		if len(uncovered) > 0 && uncovered[len(uncovered)-1].End == slot-1 {
+			uncovered[len(uncovered)-1].End = slot
+			continue
+		}
+		uncovered = append(uncovered, &ClusterSlotRange{Start: slot, End: slot})
+	}
+	return uncovered
+}
+
 func ParseClusterNode(clusterNodesTxt string) (*ClusterNode, error) {
 	for _, line := range strings.Split(clusterNodesTxt, "\n") {
 		if strings.Contains(line, "myself") {
