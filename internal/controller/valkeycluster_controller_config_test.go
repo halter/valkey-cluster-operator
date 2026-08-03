@@ -188,12 +188,16 @@ var _ = Describe("managedDefaultParameters", func() {
 		Expect(valueOf(params, "client-output-buffer-limit")).To(Equal("replica 4294967296 2147483648 120"))
 	})
 
-	It("clamps the sized directives up to their minimums on small pods", func() {
+	It("clamps the backlog up to its minimum on small pods", func() {
 		params := managedDefaultParameters(cluster("ghcr.io/halter/valkey-server:8.0.5", "128Mi", ""))
-		// 128Mi/16 = 8Mi -> min 10MiB (the compiled default); 128Mi/2 = 64Mi
-		// hits the 64MiB hard-limit floor exactly.
 		Expect(valueOf(params, "repl-backlog-size")).To(Equal("10485760"))
 		Expect(valueOf(params, "client-output-buffer-limit")).To(Equal("replica 67108864 33554432 120"))
+	})
+
+	It("keeps the sized directives within the pod's memory share on tiny pods", func() {
+		params := managedDefaultParameters(cluster("ghcr.io/halter/valkey-server:8.0.5", "64Mi", ""))
+		Expect(valueOf(params, "client-output-buffer-limit")).To(Equal("replica 33554432 16777216 120"))
+		Expect(valueOf(params, "repl-backlog-size")).To(Equal("10485760"))
 	})
 
 	It("keeps backlog no larger than the replica hard limit across sizes", func() {
@@ -212,6 +216,50 @@ var _ = Describe("managedDefaultParameters", func() {
 	It("emits only dual-channel when there is no memory limit to derive from", func() {
 		params := managedDefaultParameters(cluster("ghcr.io/halter/valkey-server:8.0.5", "", ""))
 		Expect(names(params)).To(Equal([]string{"dual-channel-replication-enabled"}))
+	})
+
+	Describe("per-pod sizing for the live-apply path", func() {
+		pod := func(memory string) *corev1.Pod {
+			p := &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "valkey-exporter"},
+						{Name: "valkey-cluster-node"},
+					},
+				},
+			}
+			if memory != "" {
+				p.Spec.Containers[1].Resources.Limits = corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse(memory),
+				}
+			}
+			return p
+		}
+
+		It("sizes from the pod's actual container limit, not the spec", func() {
+			vc := cluster("ghcr.io/halter/valkey-server:8.0.5", "16000Mi", "")
+			entries := managedConfigEntriesForPod(vc, pod("1Gi"))
+			Expect(valueOf(entries, "repl-backlog-size")).To(Equal("67108864"))
+			Expect(valueOf(entries, "client-output-buffer-limit")).To(Equal("replica 536870912 268435456 120"))
+		})
+
+		It("falls back to the spec limit when the pod carries none", func() {
+			vc := cluster("ghcr.io/halter/valkey-server:8.0.5", "16000Mi", "")
+			entries := managedConfigEntriesForPod(vc, pod(""))
+			Expect(valueOf(entries, "repl-backlog-size")).To(Equal("536870912"))
+			Expect(valueOf(entries, "client-output-buffer-limit")).To(Equal("replica 4294967296 2147483648 120"))
+		})
+
+		It("appends spec parameters after the pod-sized defaults so spec wins", func() {
+			vc := cluster("ghcr.io/halter/valkey-server:8.0.5", "16000Mi", "")
+			vc.Spec.ValkeyConfig = &cachev1alpha1.ValkeyConfig{
+				Parameters: []cachev1alpha1.ValkeyConfigParameter{
+					{Name: "repl-backlog-size", Value: "16mb"},
+				},
+			}
+			entries := effectiveManagedConfig(managedConfigEntriesForPod(vc, pod("1Gi")))
+			Expect(valueOf(entries, "repl-backlog-size")).To(Equal("16mb"))
+		})
 	})
 })
 

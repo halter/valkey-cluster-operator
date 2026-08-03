@@ -92,8 +92,14 @@ replication-tuning defaults, derived from the pod memory limit:
 | Directive | Default | Rationale |
 |---|---|---|
 | `dual-channel-replication-enabled` | `yes` | Moves full-sync buffering off the primary, structurally avoiding the primary-side output-buffer overrun that kills full syncs of large shards. |
-| `repl-backlog-size` | `clamp(memory/16, 10MiB, 512MiB)` | The compiled-in 10MiB is seconds of backlog on a busy shard; too small a backlog turns every transient disconnect into a full resync. |
-| `client-output-buffer-limit` | `replica clamp(memory/2, 64MiB, 4GiB) <hard/2> 120` | The compiled-in 256MiB hard limit kills full syncs of multi-GiB shards; conversely 256MiB exceeds the whole pod on small caches. |
+| `repl-backlog-size` | `min(clamp(memory/16, 10MiB, 512MiB), hard)` | The compiled-in 10MiB is seconds of backlog on a busy shard; too small a backlog turns every transient disconnect into a full resync. Capped at the replica hard limit, which valkey otherwise ignores. |
+| `client-output-buffer-limit` | `replica min(memory/2, 4GiB) <hard/2> 120` | The compiled-in 256MiB hard limit kills full syncs of multi-GiB shards; conversely 256MiB exceeds the whole pod on small caches, so the limit never exceeds its memory/2 share. |
+
+The sized values respect each pod's memory limit: the config file is sized
+from `spec.resources.limits.memory`, while the live-apply path sizes from the
+pod's actual container limit — after a limit change, existing pods keep their
+old limit until the rolling update replaces them, and buffers sized from the
+new spec could exceed what such a pod really has.
 
 `spec.valkeyConfig.parameters` entries are applied after the defaults, so a
 per-cluster value always overrides the fleet default. The defaults were sized

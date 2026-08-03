@@ -20,33 +20,20 @@ const (
 	// managedDefaultReplBacklogMin is Valkey's compiled-in default (10mb).
 	managedDefaultReplBacklogMin = int64(10 * 1024 * 1024)
 	managedDefaultReplBacklogMax = int64(512 * 1024 * 1024)
-	managedDefaultReplicaHardMin = int64(64 * 1024 * 1024)
 	managedDefaultReplicaHardMax = int64(4 * 1024 * 1024 * 1024)
 	// managedDefaultReplicaSoftSeconds is the soft-limit window (compiled
 	// default is 60s).
 	managedDefaultReplicaSoftSeconds = 120
 )
 
-// managedDefaultParameters returns the operator-wide replication-tuning
-// defaults, derived from the cluster's pod memory limit. Sizing rationale:
-// README, "Operator-managed defaults". They are returned only when:
-//
-//   - spec.valkeyConfig.rawConfig is empty. A raw config replaces the
-//     operator's default config file wholesale — expert mode — so the
-//     operator does not layer defaults it cannot see overridden.
-//   - the image tag parses as Valkey >= 8.0, the version that introduced
-//     dual-channel-replication-enabled (absent from valkey 7.2's valkey.conf,
-//     documented in 8.0.5's). Rendering a directive an older server does not
-//     recognise into the config file would stop pods from booting (verified
-//     on ghcr.io/halter/valkey-server:8.0.5: an unknown file directive exits
-//     1 with "Bad directive or wrong number of arguments"). Unparseable tags
-//     (digest pins, non-numeric tags) get no defaults — the safe direction:
-//     behaviour is unchanged from operator versions before this.
-//
-// spec.valkeyConfig.parameters entries are appended after these (both in the
-// config file and in the live-apply order), so a per-cluster value always
-// overrides the fleet default.
 func managedDefaultParameters(valkeyCluster *cachev1alpha1.ValkeyCluster) []cachev1alpha1.ValkeyConfigParameter {
+	return managedDefaultParametersForMemory(valkeyCluster, specMemoryLimitBytes(valkeyCluster))
+}
+
+// Only without rawConfig and on images parsing as valkey >= 8.0 — older
+// servers refuse to boot on unknown file directives. Sized values keep
+// hard <= memory/2 and backlog <= hard.
+func managedDefaultParametersForMemory(valkeyCluster *cachev1alpha1.ValkeyCluster, memoryLimit int64) []cachev1alpha1.ValkeyConfigParameter {
 	if valkeyCluster.Spec.ValkeyConfig != nil && valkeyCluster.Spec.ValkeyConfig.RawConfig != "" {
 		return nil
 	}
@@ -58,20 +45,13 @@ func managedDefaultParameters(valkeyCluster *cachev1alpha1.ValkeyCluster) []cach
 		{Name: "dual-channel-replication-enabled", Value: "yes"},
 	}
 
-	memoryLimit := podMemoryLimitBytes(valkeyCluster)
 	if memoryLimit <= 0 {
-		// No sizing basis — leave the sized directives at compiled defaults.
 		return defaults
 	}
 
-	backlog := min(max(memoryLimit/16, managedDefaultReplBacklogMin), managedDefaultReplBacklogMax)
-
-	// The replica hard limit must stay above repl-backlog-size (a replica
-	// limit below it is ignored, per valkey.conf 8.0.5); with memory/16 vs
-	// memory/2 and these clamp ranges, backlog <= hard holds for every
-	// memory value.
-	hard := min(max(memoryLimit/2, managedDefaultReplicaHardMin), managedDefaultReplicaHardMax)
+	hard := min(memoryLimit/2, managedDefaultReplicaHardMax)
 	soft := hard / 2
+	backlog := min(max(memoryLimit/16, managedDefaultReplBacklogMin), managedDefaultReplBacklogMax, hard)
 
 	return append(defaults,
 		cachev1alpha1.ValkeyConfigParameter{Name: "repl-backlog-size", Value: strconv.FormatInt(backlog, 10)},
@@ -105,11 +85,23 @@ func imageSupportsManagedDefaults(image string) bool {
 	return major >= 8
 }
 
-func podMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster) int64 {
+func specMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster) int64 {
 	if valkeyCluster.Spec.Resources == nil {
 		return 0
 	}
 	return valkeyCluster.Spec.Resources.Limits.Memory().Value()
+}
+
+func podMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster, pod *corev1.Pod) int64 {
+	for _, container := range pod.Spec.Containers {
+		if container.Name != "valkey-cluster-node" {
+			continue
+		}
+		if v := container.Resources.Limits.Memory().Value(); v > 0 {
+			return v
+		}
+	}
+	return specMemoryLimitBytes(valkeyCluster)
 }
 
 // managedConfigEntries returns the ordered list of config directives the
@@ -123,7 +115,18 @@ func podMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster) int64 {
 // reconcileValkeyConfig live-applies their effectiveManagedConfig collapse,
 // keeping the live-applied state and the restart state identical.
 func managedConfigEntries(valkeyCluster *cachev1alpha1.ValkeyCluster) []cachev1alpha1.ValkeyConfigParameter {
-	entries := managedDefaultParameters(valkeyCluster)
+	return appendSpecParameters(valkeyCluster, managedDefaultParameters(valkeyCluster))
+}
+
+// managedConfigEntriesForPod sizes the defaults from the pod's actual
+// container memory limit, which can lag spec.resources until the pod is
+// replaced by the rolling update.
+func managedConfigEntriesForPod(valkeyCluster *cachev1alpha1.ValkeyCluster, pod *corev1.Pod) []cachev1alpha1.ValkeyConfigParameter {
+	return appendSpecParameters(valkeyCluster,
+		managedDefaultParametersForMemory(valkeyCluster, podMemoryLimitBytes(valkeyCluster, pod)))
+}
+
+func appendSpecParameters(valkeyCluster *cachev1alpha1.ValkeyCluster, entries []cachev1alpha1.ValkeyConfigParameter) []cachev1alpha1.ValkeyConfigParameter {
 	if valkeyCluster.Spec.ValkeyConfig != nil {
 		entries = append(entries, valkeyCluster.Spec.ValkeyConfig.Parameters...)
 	}
@@ -212,14 +215,8 @@ func mergeClientOutputBufferLimit(base, override string) string {
 func (r *ValkeyClusterReconciler) reconcileValkeyConfig(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) ([]corev1.Pod, error) {
 	logger := log.FromContext(ctx)
 
-	entries := effectiveManagedConfig(managedConfigEntries(valkeyCluster))
-	if len(entries) == 0 {
+	if len(effectiveManagedConfig(managedConfigEntries(valkeyCluster))) == 0 {
 		return nil, nil
-	}
-
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name)
 	}
 
 	podList := &corev1.PodList{}
@@ -246,6 +243,14 @@ func (r *ValkeyClusterReconciler) reconcileValkeyConfig(ctx context.Context, val
 	for _, pod := range podList.Items {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			continue
+		}
+		entries := effectiveManagedConfig(managedConfigEntriesForPod(valkeyCluster, &pod))
+		if len(entries) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name)
 		}
 		valkeyClient, err := r.NewValkeyClient(ctx, valkeyCluster, pod.Status.PodIP, VALKEY_PORT)
 		if err != nil {
