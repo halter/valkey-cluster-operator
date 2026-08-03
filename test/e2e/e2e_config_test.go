@@ -289,7 +289,7 @@ spec:
 
 		By("waiting for the ConfigValueRejected warning event")
 		verifyEvent := func() error {
-			return eventWithReasonExists("ConfigValueRejected")
+			return eventWithReasonExists(configClusterName, "ConfigValueRejected")
 		}
 		EventuallyWithOffset(1, verifyEvent, 2*time.Minute, 5*time.Second).Should(Succeed())
 
@@ -375,16 +375,13 @@ spec:
 })
 
 // expectedManagedDefaults mirrors the derivation in the README's
-// "Operator-managed defaults" table: repl-backlog-size clamp(memory/16,
-// 10MiB, 512MiB) and a replica client-output-buffer-limit of clamp(memory/2,
-// 64MiB, 4GiB) hard / hard/2 soft.
+// "Operator-managed defaults" table: a replica client-output-buffer-limit of
+// min(memory/2, 4GiB) hard / hard/2 soft, and repl-backlog-size
+// min(clamp(memory/16, 10MiB, 512MiB), hard).
 func expectedManagedDefaults(memoryLimitBytes int64) (backlog, hard, soft int64) {
-	clamp := func(v, lo, hi int64) int64 {
-		return min(max(v, lo), hi)
-	}
-	backlog = clamp(memoryLimitBytes/16, 10*1024*1024, 512*1024*1024)
-	hard = clamp(memoryLimitBytes/2, 64*1024*1024, 4*1024*1024*1024)
+	hard = min(memoryLimitBytes/2, 4*1024*1024*1024)
 	soft = hard / 2
+	backlog = min(max(memoryLimitBytes/16, 10*1024*1024), 512*1024*1024, hard)
 	return backlog, hard, soft
 }
 
@@ -506,12 +503,12 @@ func configMapContains(expected ...string) error {
 	return nil
 }
 
-// eventWithReasonExists reports whether the config test cluster has emitted
-// an event with the given reason.
-func eventWithReasonExists(reason string) error {
+// eventWithReasonExists reports whether the named cluster has emitted an
+// event with the given reason.
+func eventWithReasonExists(clusterName, reason string) error {
 	cmd := exec.Command("kubectl", "get", "events",
 		"-n", namespace,
-		"--field-selector", fmt.Sprintf("reason=%s,involvedObject.name=%s", reason, configClusterName),
+		"--field-selector", fmt.Sprintf("reason=%s,involvedObject.name=%s", reason, clusterName),
 		"-o", "go-template={{ range .items }}{{ .reason }}{{ \"\\n\" }}{{ end }}",
 	)
 	output, err := utils.Run(cmd)
@@ -519,7 +516,7 @@ func eventWithReasonExists(reason string) error {
 		return fmt.Errorf("received error getting events: %w", err)
 	}
 	if len(utils.GetNonEmptyLines(string(output))) == 0 {
-		return fmt.Errorf("expected an event with reason %s for %s", reason, configClusterName)
+		return fmt.Errorf("expected an event with reason %s for %s", reason, clusterName)
 	}
 	return nil
 }
