@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Valkey node startup check. The node is considered started when any of:
 # 1. Cluster state is "ok"

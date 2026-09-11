@@ -175,7 +175,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 							StartupProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									Exec: &corev1.ExecAction{
-										Command: []string{"/bin/bash", "/scripts/startup.sh"},
+										Command: []string{"/bin/sh", "/scripts/startup.sh"},
 									},
 								},
 								TimeoutSeconds:   5,
