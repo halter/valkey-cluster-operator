@@ -19,15 +19,14 @@ if valkey_cli 127.0.0.1 6379 -t 1 -c CLUSTER INFO 2>/dev/null | grep -q "cluster
 fi
 
 nodes=$(valkey_cli 127.0.0.1 6379 -t 1 -c CLUSTER NODES 2>/dev/null)
-if [ -n "$nodes" ]; then
+myself=$(echo "$nodes" | awk '$3 ~ /(^|,)myself(,|$)/')
+if [ -n "$myself" ]; then
 	if [ "$(echo "$nodes" | grep -c .)" -eq 1 ]; then
 		echo "Startup check passed: node doesn't know about any other nodes"
 		exit 0
 	fi
 
-	# Slot assignments are the fields after the first 8 on this node's line
-	myself=$(echo "$nodes" | grep myself)
-	if [ -n "$myself" ] && [ "$(echo "$myself" | awk '{print NF}')" -le 8 ]; then
+	if [ "$(echo "$myself" | awk '{print NF}')" -le 8 ]; then
 		echo "Startup check passed: node has no slots assigned"
 		exit 0
 	fi
@@ -39,5 +38,11 @@ if [ -n "$uptime" ] && [ "$uptime" -ge "$TIMEOUT_SECONDS" ]; then
 	exit 0
 fi
 
-echo "Startup check failed: cluster state not ok, node has slots and peers, uptime ${uptime:-unknown}s below ${TIMEOUT_SECONDS}s timeout"
+uptime_desc="${uptime}s"
+[ -n "$uptime" ] || uptime_desc=unknown
+if [ -z "$myself" ]; then
+	echo "Startup check failed: unexpected CLUSTER NODES reply '$(echo "$nodes" | head -c 200)', uptime ${uptime_desc} below ${TIMEOUT_SECONDS}s timeout"
+else
+	echo "Startup check failed: cluster state not ok, node has slots and peers, uptime ${uptime_desc} below ${TIMEOUT_SECONDS}s timeout"
+fi
 exit 1
