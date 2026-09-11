@@ -27,8 +27,9 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 			Labels:    ls,
 		},
 		Spec: corev1.ServiceSpec{
-			Selector:  ls,
-			ClusterIP: "None",
+			Selector:                 ls,
+			ClusterIP:                "None",
+			PublishNotReadyAddresses: true,
 			Ports: []corev1.ServicePort{
 				{
 					Port:       6379,
@@ -46,7 +47,7 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 			if err = r.Get(ctx, types.NamespacedName{Name: name, Namespace: valkeyCluster.Namespace}, found); err != nil {
 				logger.Error(err, "failed to get Service")
 			}
-			needsUpdate := false
+			needsUpdate := found.Spec.PublishNotReadyAddresses != svc.Spec.PublishNotReadyAddresses
 
 			if len(found.Spec.Ports) != len(svc.Spec.Ports) {
 				needsUpdate = true
