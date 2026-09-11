@@ -600,7 +600,7 @@ func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valk
 	})
 
 	for _, sts := range stsList.Items {
-		if sts.Status.UpdateRevision == "" || sts.Status.UpdateRevision == sts.Status.CurrentRevision {
+		if sts.Status.UpdateRevision == "" {
 			continue
 		}
 
