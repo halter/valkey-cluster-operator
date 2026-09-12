@@ -51,9 +51,21 @@ spec:
                 type: string
               initialDelaySeconds:
                 default: 30
-                description: Number of seconds after the container has started before
-                  liveness probes are initiated.
+                description: |-
+                  Deprecated: ignored. The valkey container runs a fixed startup probe
+                  (/scripts/startup.sh) and its readiness probe has no initial delay.
+                  Retained for API compatibility and will be removed in a future version.
                 format: int32
+                type: integer
+              meetTimeoutSeconds:
+                default: 600
+                description: |-
+                  Seconds a restarted node keeps trying to re-introduce itself to each peer
+                  recorded in its nodes.conf. Must exceed the longest time any peer can take
+                  to load its dataset, otherwise a full restart only recovers once the
+                  startup probe fails open.
+                format: int32
+                minimum: 1
                 type: integer
               minReadySeconds:
                 default: 10

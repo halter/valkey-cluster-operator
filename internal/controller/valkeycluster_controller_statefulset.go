@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -172,13 +173,26 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 									},
 								},
 							},
+							StartupProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"/bin/sh", "/scripts/startup.sh"},
+									},
+								},
+								TimeoutSeconds:   5,
+								PeriodSeconds:    10,
+								SuccessThreshold: 1,
+								// The script fails open once uptime exceeds 300s, so this
+								// threshold (40 * 10s = 400s) must stay comfortably above it
+								// to avoid kubelet restarting the container first.
+								FailureThreshold: 40,
+							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									TCPSocket: &corev1.TCPSocketAction{
 										Port: intstr.FromInt(VALKEY_PORT),
 									},
 								},
-								InitialDelaySeconds: valkeyCluster.Spec.InitialDelaySeconds,
 							},
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -200,6 +214,10 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								{
 									Name:  "NODE_HOSTNAME_SUFFIX",
 									Value: "." + valkeyCluster.Name + "-headless." + valkeyCluster.Namespace + ".svc.cluster.local",
+								},
+								{
+									Name:  "MEET_TIMEOUT_SECONDS",
+									Value: strconv.Itoa(int(meetTimeoutSeconds(valkeyCluster))),
 								},
 							},
 							WorkingDir: "/data",
@@ -495,7 +513,7 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 // - valkey-server command
 // - valkey-server lifecycle
 // - valkey-server environment
-// - valkey-server readiness probe
+// - valkey-server startup probe
 // - metrics command
 // It's really important that you consider updating applyDesiredStatefulSetSpec if this function changes
 func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, stsName string) (bool, error) {
@@ -524,8 +542,8 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 		log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
 		diff = true
 	}
-	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds) {
-		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe.InitialDelaySeconds is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds)))
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].StartupProbe, desired.Spec.Template.Spec.Containers[0].StartupProbe) {
+		log.Info(fmt.Sprintf("StatefulSet %s StartupProbe is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].StartupProbe, desired.Spec.Template.Spec.Containers[0].StartupProbe)))
 		diff = true
 	}
 
@@ -551,6 +569,7 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 		ss.Spec.Template.Spec.Containers[0].Lifecycle = desired.Spec.Template.Spec.Containers[0].Lifecycle
 		ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
 		ss.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
+		ss.Spec.Template.Spec.Containers[0].StartupProbe = desired.Spec.Template.Spec.Containers[0].StartupProbe
 		ss.Spec.Template.Spec.Containers[0].ReadinessProbe = desired.Spec.Template.Spec.Containers[0].ReadinessProbe
 
 		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
@@ -584,7 +603,7 @@ func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valk
 	})
 
 	for _, sts := range stsList.Items {
-		if sts.Status.UpdateRevision == "" || sts.Status.UpdateRevision == sts.Status.CurrentRevision {
+		if sts.Status.UpdateRevision == "" {
 			continue
 		}
 
@@ -625,6 +644,15 @@ func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valk
 	}
 
 	return nil, nil
+}
+
+const defaultMeetTimeoutSeconds int32 = 600
+
+func meetTimeoutSeconds(valkeyCluster *cachev1alpha1.ValkeyCluster) int32 {
+	if valkeyCluster.Spec.MeetTimeoutSeconds > 0 {
+		return valkeyCluster.Spec.MeetTimeoutSeconds
+	}
+	return defaultMeetTimeoutSeconds
 }
 
 // performConfigRestarts deletes pods whose runtime config cannot be converged
