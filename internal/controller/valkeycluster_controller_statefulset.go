@@ -586,8 +586,6 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 // automatically; this method drives the rollout. Processing one pod per shard in parallel
 // keeps the rollout fast while maintaining cluster safety.
 func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (*ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	stsList := &appsv1.StatefulSetList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(valkeyCluster.Namespace),
@@ -638,43 +636,11 @@ func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valk
 			continue
 		}
 
-		// Gate each pod deletion on cluster health. All pods must be Running/Ready
-		// and the cluster must report cluster_state:ok before we proceed.
-		healthy, err := r.isValkeyClusterHealthy(ctx, valkeyCluster)
-		if err != nil {
-			logger.Error(err, "Failed to check Valkey cluster health before rolling update, will retry")
-			return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		if !healthy {
-			logger.Info("Valkey cluster is not healthy, deferring rolling update",
-				"shard", sts.Name,
-				"podsNeedingUpdate", len(podsNeedingUpdate),
-			)
-			r.Recorder.Event(valkeyCluster, "Warning", "RollingUpdate",
-				fmt.Sprintf("Cluster not healthy, deferring rolling update of shard %s (%d pods pending)", sts.Name, len(podsNeedingUpdate)))
-			return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-
-		// Delete replicas before masters: higher ordinal name = replica, lower = master.
-		sort.Slice(podsNeedingUpdate, func(i, j int) bool {
-			return podsNeedingUpdate[i].Name > podsNeedingUpdate[j].Name
-		})
-		podToDelete := podsNeedingUpdate[0]
-		logger.Info("Deleting pod for rolling update",
-			"pod", podToDelete.Name,
-			"shard", sts.Name,
-			"remainingAfterDeletion", len(podsNeedingUpdate)-1,
-		)
-		if err := r.Delete(ctx, &podToDelete); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete pod for rolling update", "pod", podToDelete.Name)
-			return nil, err
-		}
-		r.Recorder.Event(valkeyCluster, "Normal", "RollingUpdate",
-			fmt.Sprintf("Deleted pod %s for rolling update, %d pods remaining in shard %s", podToDelete.Name, len(podsNeedingUpdate)-1, sts.Name))
-
-		// Return and requeue — we only ever delete one pod per reconcile cycle,
-		// and we complete one shard before advancing to the next.
-		return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		// Delete one pod, gated on cluster health — we only ever delete one pod
+		// per reconcile cycle, and we complete one shard before advancing to
+		// the next.
+		return r.deleteOnePodHealthGated(ctx, valkeyCluster, podsNeedingUpdate,
+			"RollingUpdate", "rolling update", fmt.Sprintf(" in shard %s", sts.Name))
 	}
 
 	return nil, nil
@@ -687,4 +653,60 @@ func meetTimeoutSeconds(valkeyCluster *cachev1alpha1.ValkeyCluster) int32 {
 		return valkeyCluster.Spec.MeetTimeoutSeconds
 	}
 	return defaultMeetTimeoutSeconds
+}
+
+// performConfigRestarts deletes pods whose runtime config cannot be converged
+// to spec.valkeyConfig via CONFIG SET (immutable directives, as detected by
+// reconcileValkeyConfig). The recreated pod mounts the current ConfigMap and
+// boots with the desired directive; convergence is re-derived from live state
+// on the next reconcile, so there is no annotation bookkeeping to go stale.
+func (r *ValkeyClusterReconciler) performConfigRestarts(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, pods []corev1.Pod) (*ctrl.Result, error) {
+	if len(pods) == 0 {
+		return nil, nil
+	}
+	return r.deleteOnePodHealthGated(ctx, valkeyCluster, pods, "ConfigRestart", "config restart", "")
+}
+
+// deleteOnePodHealthGated deletes at most one pod per call: the first of the
+// given pods after sorting by name descending, so replicas (higher ordinals)
+// restart before primaries. The deletion is gated on full cluster health —
+// all pods Running/Ready, cluster_state:ok, and replicas caught up — and the
+// caller is requeued to re-derive the remaining work on the next reconcile.
+// scope is an optional suffix for event messages (e.g. " in shard x").
+func (r *ValkeyClusterReconciler) deleteOnePodHealthGated(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, pods []corev1.Pod, eventReason, action, scope string) (*ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	healthy, err := r.isValkeyClusterHealthy(ctx, valkeyCluster)
+	if err != nil {
+		logger.Error(err, "Failed to check Valkey cluster health, will retry", "action", action)
+		return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if !healthy {
+		logger.Info("Valkey cluster is not healthy, deferring pod deletion",
+			"action", action,
+			"podsPending", len(pods),
+		)
+		r.Recorder.Event(valkeyCluster, "Warning", eventReason,
+			fmt.Sprintf("Cluster not healthy, deferring %s%s (%d pods pending)", action, scope, len(pods)))
+		return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Delete replicas before primaries: higher ordinal name = replica, lower = primary.
+	sort.Slice(pods, func(i, j int) bool {
+		return pods[i].Name > pods[j].Name
+	})
+	podToDelete := pods[0]
+	logger.Info("Deleting pod",
+		"action", action,
+		"pod", podToDelete.Name,
+		"remainingAfterDeletion", len(pods)-1,
+	)
+	if err := r.Delete(ctx, &podToDelete); err != nil && !apierrors.IsNotFound(err) {
+		logger.Error(err, "Failed to delete pod", "action", action, "pod", podToDelete.Name)
+		return nil, err
+	}
+	r.Recorder.Event(valkeyCluster, "Normal", eventReason,
+		fmt.Sprintf("Deleted pod %s for %s, %d pods remaining%s", podToDelete.Name, action, len(pods)-1, scope))
+
+	return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }

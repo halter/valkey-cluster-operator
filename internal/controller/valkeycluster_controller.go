@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -216,7 +217,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// We may add the option to force a restart in future using the hash of the updated valkey config
+	// Config changes are applied to running pods by reconcileValkeyConfig
+	// below; directives that cannot be set at runtime are applied by a
+	// health-gated rolling restart (performConfigRestarts) onto this file.
 	_, err = r.upsertConfigMap(ctx, valkeyCluster)
 	if err != nil {
 		log.Error(err, "Failed to upsert configmap")
@@ -253,6 +256,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// authenticated while pods restart with the new config file.
 	if err := r.reconcileAuth(ctx, valkeyCluster); err != nil {
 		log.Error(err, "Failed to reconcile auth config")
+		return ctrl.Result{}, err
+	}
+
+	// Live-apply the managed config directives (spec.valkeyConfig) to running
+	// pods and collect any pods that need a restart for directives the server
+	// cannot set at runtime. The restarts themselves are driven at the end of
+	// the reconcile (performConfigRestarts), after any in-flight revision
+	// rollout has priority.
+	podsNeedingConfigRestart, err := r.reconcileValkeyConfig(ctx, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile valkey config")
 		return ctrl.Result{}, err
 	}
 
@@ -309,6 +323,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				log.Info(fmt.Sprintf("Removing %s from %s/%s", cn.ID, valkeyCluster.Namespace, valkeyCluster.Name))
 				err := jobMgr.DeleteNode(ctx, valkeyCluster, cn.ID)
 				if err != nil {
+					// A valkey-cli Job is still running; wait for it rather than failing.
+					if errors.Is(err, errValkeyCliJobStillRunning) {
+						log.Info("valkey-cli Job still running, requeueing before removing cluster node",
+							"nodeID", cn.ID,
+							"requeueAfter", "30s")
+						return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+					}
 					log.Error(err, "Failed to remove cluster node")
 					return ctrl.Result{}, err
 				}
@@ -387,6 +408,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	clusterNodes, err := r.buildClusterNodes(ctx, valkeyCluster)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("Could not build cluster nodes: %w", err)
+	}
+
+	// Must run before slot assignment and replication setup, which both fight
+	// a dead node's slot ownership.
+	res, err = r.remediateDeadNodes(ctx, valkeyCluster, clusterNodes)
+	if err != nil {
+		log.Error(err, "Failed to remediate dead cluster nodes")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
 	}
 
 	// cluster meet
@@ -784,6 +816,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return *res, nil
 	}
 
+	// Restart pods whose runtime config cannot converge to spec via CONFIG SET
+	// (immutable directives), one pod at a time, gated on cluster health. Runs
+	// after performRollingUpdate so a revision rollout — which also restarts
+	// pods onto the current config file — always takes priority.
+	res, err = r.performConfigRestarts(ctx, valkeyCluster, podsNeedingConfigRestart)
+	if err != nil {
+		log.Error(err, "Failed to perform config restarts")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
+	}
+
 	// Requeue periodically so disk usage keeps being monitored while the
 	// cluster is otherwise stable.
 	return ctrl.Result{RequeueAfter: diskUsagePollInterval}, nil
@@ -991,6 +1036,26 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 		"name", valkeyCluster.Name,
 		"expectedShards", valkeyCluster.Spec.Shards)
 
+	// A valkey-cli Job from a previous reconcile may still be running, e.g. a
+	// reshard step that outlived waitForJobCompletion's wait. Reap finished
+	// leftovers, and if one is still running let it finish before planning or
+	// starting any other cluster operation against it.
+	runningJob, err := r.settleValkeyCliJobs(ctx, valkeyCluster, logger)
+	if err != nil {
+		logger.Error(err, "Failed to settle leftover valkey-cli Jobs")
+		return nil, err
+	}
+	if runningJob != nil {
+		// Log-only on purpose: this branch repeats every 30s while a long
+		// migration runs, so emitting an Event here would spam the cluster's
+		// event stream. Reshard steps that outlive the wait emit a one-off
+		// ValkeyCliJobRunning event when first detected below.
+		logger.Info("Waiting for still-running valkey-cli Job before reconciling slots",
+			"jobName", runningJob.Name,
+			"requeueAfter", "30s")
+		return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	clusterNodesForShard, err := r.buildClusterNodesForShard(ctx, valkeyCluster)
 	if err != nil {
 		logger.Error(err, "Failed to build cluster nodes for shard")
@@ -1026,6 +1091,17 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 
 	actionPlan, err := internalValkey.GenerateReshardingPlan(clusterNodesForShard, int(valkeyCluster.Spec.Shards))
 	if err != nil {
+		// Slot totals that don't sum to 16384 mean the nodes' views of slot
+		// ownership haven't settled (a migration is in flight), not that the
+		// cluster is broken. Wait and re-plan instead of failing the reconcile.
+		if errors.Is(err, internalValkey.ErrSlotsMigrationInFlight) {
+			logger.Info("Slot migration in flight, requeueing before generating a resharding plan",
+				"error", err,
+				"requeueAfter", "30s")
+			r.Recorder.Event(valkeyCluster, "Normal", "SlotMigrationInFlight",
+				"Observed slot totals != 16384, waiting for slot migration to settle before resharding")
+			return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
 		logger.Error(err, "Failed to generate resharding plan",
 			"shardCount", len(clusterNodesForShard),
 			"expectedShards", valkeyCluster.Spec.Shards)
@@ -1042,6 +1118,12 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 
 		fixed, err := jobMgr.FixStuckSlotsIfNeeded(ctx, valkeyCluster, logger)
 		if err != nil {
+			// A valkey-cli Job is still running; wait for it rather than failing.
+			if errors.Is(err, errValkeyCliJobStillRunning) {
+				logger.Info("valkey-cli Job still running while fixing stuck slots, requeueing",
+					"requeueAfter", "30s")
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
 			// Check if the error is due to cluster being down
 			if strings.Contains(err.Error(), "cluster is down during fix attempt") {
 				logger.Info("Cluster is down during fix, will retry",
@@ -1074,6 +1156,21 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 
 		err := jobMgr.ReshardSlots(ctx, valkeyCluster, plan.FromID, plan.ToID, plan.Slots)
 		if err != nil {
+			// The reshard Job is still running: large steps routinely take longer
+			// than waitForJobCompletion is willing to block a reconcile for. The
+			// Job keeps migrating; requeue and pick it up on a later reconcile.
+			if errors.Is(err, errValkeyCliJobStillRunning) {
+				logger.Info("Reshard Job still running, requeueing to wait for it",
+					"stepIndex", idx,
+					"slots", plan.Slots,
+					"fromID", plan.FromID,
+					"toID", plan.ToID,
+					"requeueAfter", "30s")
+				r.Recorder.Event(valkeyCluster, "Normal", "ValkeyCliJobRunning",
+					fmt.Sprintf("Reshard of %d slots from %s to %s is still running, waiting for it to complete", plan.Slots, plan.FromID, plan.ToID))
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
 			// Check if the cluster is down - if so, delay and retry
 			if strings.Contains(err.Error(), "CLUSTERDOWN") {
 				logger.Info("Cluster is down during resharding, will retry",
@@ -1107,6 +1204,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeySlots(ctx context.Context, valk
 
 		fixed, err := jobMgr.FixStuckSlotsIfNeeded(ctx, valkeyCluster, logger)
 		if err != nil {
+			// A valkey-cli Job is still running; wait for it rather than failing.
+			if errors.Is(err, errValkeyCliJobStillRunning) {
+				logger.Info("valkey-cli Job still running while fixing stuck slots after migration step, requeueing",
+					"stepIndex", idx,
+					"requeueAfter", "30s")
+				return &ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
 			// Check if the error is due to cluster being down
 			if strings.Contains(err.Error(), "cluster is down during fix attempt") {
 				logger.Info("Cluster is down during fix after migration, will retry",

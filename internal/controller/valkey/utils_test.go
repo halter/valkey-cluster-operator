@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSlotRanges(t *testing.T) {
@@ -446,6 +447,53 @@ func TestGenerateReshardingPlan(t *testing.T) {
 	}
 }
 
+func TestGenerateReshardingPlanMigrationInFlight(t *testing.T) {
+	master := func(pod, id string, slotRanges ...*ClusterSlotRange) []*ClusterNode {
+		return []*ClusterNode{
+			{
+				Pod:        pod,
+				ID:         id,
+				Flags:      []string{"master"},
+				SlotRanges: slotRanges,
+			},
+		}
+	}
+
+	testcases := []struct {
+		name                 string
+		clusterNodesForShard map[int][]*ClusterNode
+		desiredShards        int
+	}{
+		{
+			// While a slot migrates, the importing primary can already claim it
+			// in its own CLUSTER NODES view before the donor releases it, so the
+			// per-shard counts sum to 16385.
+			name: "double counted slot during migration",
+			clusterNodesForShard: map[int][]*ClusterNode{
+				0: master("keyval-0-0", "00000000000000000000", &ClusterSlotRange{0, 8191}),
+				1: master("keyval-1-0", "55555555555555555555", &ClusterSlotRange{8191, 16383}),
+			},
+			desiredShards: 2,
+		},
+		{
+			// A slot can also transiently have no owner, summing to 16383.
+			name: "unowned slot during migration",
+			clusterNodesForShard: map[int][]*ClusterNode{
+				0: master("keyval-0-0", "00000000000000000000", &ClusterSlotRange{0, 8190}),
+				1: master("keyval-1-0", "55555555555555555555", &ClusterSlotRange{8192, 16383}),
+			},
+			desiredShards: 2,
+		},
+	}
+	for _, tt := range testcases {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := GenerateReshardingPlan(tt.clusterNodesForShard, tt.desiredShards)
+			require.ErrorIs(t, err, ErrSlotsMigrationInFlight)
+			assert.Nil(t, plan)
+		})
+	}
+}
+
 func TestParseInfoReplication(t *testing.T) {
 	testcases := []struct {
 		name string
@@ -568,4 +616,94 @@ slave_repl_offset:999
 			assert.Equal(t, tt.out, actual)
 		})
 	}
+}
+
+func TestFindDeadNodes(t *testing.T) {
+	topologyTxt := `530e79a7306c62ce8edd1d1fd23ceb42f0b76529 10.9.0.118:6379@16379 master - 0 1747631314884 1 connected 8192-16383
+fd5a39e1e47b38d0cfabc11388fd7230c2c0f183 10.9.8.19:6379@16379 myself,master - 0 0 0 connected
+2ce359297f259ff422218053d9c38e8eee5ac3f6 10.9.15.190:6379@16379 master,fail - 1747631310000 1747631314000 2 connected 0-8191
+552b84fa4644cdb3dd963462378dc3805568c2ae 10.9.22.221:6379@16379 slave,fail 2ce359297f259ff422218053d9c38e8eee5ac3f6 1747631310000 1747631315388 2 connected
+64c28a06b360d40fc811eee290fd874fe08a140e 10.9.22.17:6379@16379 master,fail? - 0 1747631315000 7 connected
+`
+
+	topology, err := ParseClusterNodes(topologyTxt)
+	require.NoError(t, err)
+	require.Len(t, topology, 5)
+
+	t.Run("returns hard-failed nodes not backed by a live pod", func(t *testing.T) {
+		liveNodeIDs := map[string]bool{
+			"530e79a7306c62ce8edd1d1fd23ceb42f0b76529": true,
+			"fd5a39e1e47b38d0cfabc11388fd7230c2c0f183": true,
+		}
+		deadNodes := FindDeadNodes(topology, liveNodeIDs)
+		require.Len(t, deadNodes, 2)
+		assert.Equal(t, "2ce359297f259ff422218053d9c38e8eee5ac3f6", deadNodes[0].ID)
+		assert.True(t, deadNodes[0].HasSlots())
+		assert.Equal(t, 8192, deadNodes[0].SlotCount())
+		assert.Equal(t, "552b84fa4644cdb3dd963462378dc3805568c2ae", deadNodes[1].ID)
+		assert.False(t, deadNodes[1].HasSlots())
+	})
+
+	t.Run("does not report a fail-flagged node that a live pod answers for", func(t *testing.T) {
+		liveNodeIDs := map[string]bool{
+			"530e79a7306c62ce8edd1d1fd23ceb42f0b76529": true,
+			"fd5a39e1e47b38d0cfabc11388fd7230c2c0f183": true,
+			"2ce359297f259ff422218053d9c38e8eee5ac3f6": true,
+			"552b84fa4644cdb3dd963462378dc3805568c2ae": true,
+		}
+		deadNodes := FindDeadNodes(topology, liveNodeIDs)
+		assert.Empty(t, deadNodes)
+	})
+
+	t.Run("does not report unconfirmed fail? or healthy absent nodes", func(t *testing.T) {
+		deadNodes := FindDeadNodes(topology, map[string]bool{})
+		for _, dead := range deadNodes {
+			assert.True(t, dead.HasFlag("fail"), "node %s", dead.ID)
+		}
+		require.Len(t, deadNodes, 2)
+	})
+}
+
+func TestUncoveredSlotRanges(t *testing.T) {
+	view := func(ranges ...ClusterSlotRange) []*ClusterNode {
+		node := &ClusterNode{ID: "a", Flags: []string{"master"}}
+		for i := range ranges {
+			node.SlotRanges = append(node.SlotRanges, &ranges[i])
+		}
+		return []*ClusterNode{node}
+	}
+
+	t.Run("full coverage yields nothing", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{view(ClusterSlotRange{0, 16383})})
+		assert.Empty(t, got)
+	})
+
+	t.Run("returns the gap between covered ranges", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{view(ClusterSlotRange{0, 5460}, ClusterSlotRange{10922, 16383})})
+		require.Len(t, got, 1)
+		assert.Equal(t, 5461, got[0].Start)
+		assert.Equal(t, 10921, got[0].End)
+	})
+
+	t.Run("unions coverage across views", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{
+			view(ClusterSlotRange{0, 5460}),
+			view(ClusterSlotRange{5461, 16383}),
+		})
+		assert.Empty(t, got)
+	})
+
+	t.Run("returns multiple gaps including boundaries", func(t *testing.T) {
+		got := UncoveredSlotRanges([][]*ClusterNode{view(ClusterSlotRange{1, 1}, ClusterSlotRange{3, 16382})})
+		require.Len(t, got, 3)
+		assert.Equal(t, &ClusterSlotRange{0, 0}, got[0])
+		assert.Equal(t, &ClusterSlotRange{2, 2}, got[1])
+		assert.Equal(t, &ClusterSlotRange{16383, 16383}, got[2])
+	})
+
+	t.Run("no views means everything is uncovered", func(t *testing.T) {
+		got := UncoveredSlotRanges(nil)
+		require.Len(t, got, 1)
+		assert.Equal(t, &ClusterSlotRange{0, 16383}, got[0])
+	})
 }
