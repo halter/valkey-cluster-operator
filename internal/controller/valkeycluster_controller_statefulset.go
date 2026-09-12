@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -213,6 +214,10 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 								{
 									Name:  "NODE_HOSTNAME_SUFFIX",
 									Value: "." + valkeyCluster.Name + "-headless." + valkeyCluster.Namespace + ".svc.cluster.local",
+								},
+								{
+									Name:  "MEET_TIMEOUT_SECONDS",
+									Value: strconv.Itoa(int(meetTimeoutSeconds(valkeyCluster))),
 								},
 							},
 							WorkingDir: "/data",
@@ -673,4 +678,13 @@ func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valk
 	}
 
 	return nil, nil
+}
+
+const defaultMeetTimeoutSeconds int32 = 600
+
+func meetTimeoutSeconds(valkeyCluster *cachev1alpha1.ValkeyCluster) int32 {
+	if valkeyCluster.Spec.MeetTimeoutSeconds > 0 {
+		return valkeyCluster.Spec.MeetTimeoutSeconds
+	}
+	return defaultMeetTimeoutSeconds
 }

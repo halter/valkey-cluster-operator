@@ -76,6 +76,15 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default=10
 	MinReadySeconds int32 `json:"minReadySeconds,omitempty"`
 
+	// Seconds a restarted node keeps trying to re-introduce itself to each peer
+	// recorded in its nodes.conf. Must exceed the longest time any peer can take
+	// to load its dataset, otherwise a full restart only recovers once the
+	// startup probe fails open.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=600
+	MeetTimeoutSeconds int32 `json:"meetTimeoutSeconds,omitempty"`
+
 	// Tolerations
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`

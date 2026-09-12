@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,14 +31,23 @@ import (
 )
 
 const (
-	probeClusterName  = "valkeycluster-probe"
-	legacyClusterName = "valkeycluster-legacy"
-	legacyImage       = "ghcr.io/halter/valkey:8.0.2"
-	valkeyContainer   = "valkey-cluster-node"
-	controllerDeploy  = "valkey-cluster-operator-controller-manager"
+	probeClusterName    = "valkeycluster-probe"
+	legacyClusterName   = "valkeycluster-legacy"
+	slowLoadClusterName = "valkeycluster-slowload"
+	legacyImage         = "ghcr.io/halter/valkey:8.0.2"
+	valkeyContainer     = "valkey-cluster-node"
+	controllerDeploy    = "valkey-cluster-operator-controller-manager"
 
-	startupFailOpenSeconds = 300
+	startupFailOpenSeconds  = 300
+	legacyMeetWindowSeconds = 60
+	slowLoadKeys            = 10000
+	slowLoadKeyDelayMicros  = 10000
 )
+
+type configParameter struct {
+	name  string
+	value string
+}
 
 type probeSpec struct {
 	Exec *struct {
@@ -73,8 +83,9 @@ func kubectlApply(manifest string) error {
 	return err
 }
 
-func valkeyClusterManifest(name, image string, shards, replicas int) string {
-	return fmt.Sprintf(`apiVersion: cache.halter.io/v1alpha1
+func valkeyClusterManifest(name, image string, shards, replicas int, params ...configParameter) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `apiVersion: cache.halter.io/v1alpha1
 kind: ValkeyCluster
 metadata:
   name: %s
@@ -98,6 +109,13 @@ spec:
         storage: 2Gi
     storageClassName: standard
 `, name, image, shards, replicas)
+	if len(params) > 0 {
+		sb.WriteString("  valkeyConfig:\n    parameters:\n")
+		for _, p := range params {
+			fmt.Fprintf(&sb, "    - name: %s\n      value: %q\n", p.name, p.value)
+		}
+	}
+	return sb.String()
 }
 
 func livePodNames(selector string) ([]string, error) {
@@ -165,6 +183,19 @@ func podField(pod, jsonpath string) (string, error) {
 func execInValkey(pod string, command ...string) ([]byte, error) {
 	args := append([]string{"exec", pod, "-c", valkeyContainer, "--"}, command...)
 	return kubectl(args...)
+}
+
+func valkeyInfoField(pod, section, field string) (string, error) {
+	out, err := execInValkey(pod, "valkey-cli", "INFO", section)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), field+":"); ok {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("%s: %s not in INFO %s: %q", pod, field, section, out)
 }
 
 func verifyPodsStartedWithoutRestarts(name string) func() error {
@@ -281,7 +312,7 @@ var _ = Describe("startup probe", Ordered, ContinueOnFailure, func() {
 
 	AfterAll(func() {
 		By("cleaning up startup probe test resources")
-		for _, name := range []string{probeClusterName, legacyClusterName} {
+		for _, name := range []string{probeClusterName, legacyClusterName, slowLoadClusterName} {
 			_, _ = kubectl("delete", "--timeout=60s", "--ignore-not-found", "valkeycluster", name)
 			_, _ = kubectl("delete", "--timeout=30s", "--ignore-not-found", "pvc", "-l", "cache/name="+name)
 		}
@@ -530,5 +561,89 @@ var _ = Describe("startup probe", Ordered, ContinueOnFailure, func() {
 			return verifyClusterState(legacyClusterName, 1, 0, "")()
 		}, 4*time.Minute, 10*time.Second).Should(Succeed())
 		Expect(verifyStartupProbeInterpreterExists(legacyClusterName)()).To(Succeed())
+	})
+
+	It("recovers from a full restart when a node loads its dataset slower than the legacy meet window", func() {
+		By("creating a two shard cluster without replicas that loads keys slowly")
+		Expect(kubectlApply(valkeyClusterManifest(slowLoadClusterName, "valkey-server:latest", 2, 0,
+			configParameter{"key-load-delay", strconv.Itoa(slowLoadKeyDelayMicros)},
+			configParameter{"loading-process-events-interval-bytes", "1024"},
+		))).To(Succeed())
+		Eventually(verifyClusterState(slowLoadClusterName, 2, 0, ""), 4*time.Minute, 15*time.Second).Should(Succeed())
+		Eventually(verifyPodsStartedWithoutRestarts(slowLoadClusterName), time.Minute, 2*time.Second).Should(Succeed())
+		pods, err := clusterPodNames(slowLoadClusterName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pods).To(HaveLen(2))
+
+		By("writing keys that all hash to one node")
+		script := fmt.Sprintf(`i=0; while [ "$i" -lt %d ]; do echo "SET {slow}:$i v"; i=$((i+1)); done | valkey-cli -c >/dev/null`, slowLoadKeys)
+		_, err = execInValkey(pods[0], "sh", "-c", script)
+		Expect(err).NotTo(HaveOccurred())
+		slowPod := ""
+		for _, pod := range pods {
+			out, err := execInValkey(pod, "valkey-cli", "DBSIZE")
+			Expect(err).NotTo(HaveOccurred())
+			if strings.TrimSpace(string(out)) == strconv.Itoa(slowLoadKeys) {
+				slowPod = pod
+			}
+		}
+		Expect(slowPod).NotTo(BeEmpty(), "no pod holds all %d keys", slowLoadKeys)
+
+		By("rewriting the AOF so the keys load from its RDB preamble")
+		_, err = execInValkey(slowPod, "valkey-cli", "BGREWRITEAOF")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() error {
+			for _, field := range []string{"aof_rewrite_scheduled", "aof_rewrite_in_progress"} {
+				value, err := valkeyInfoField(slowPod, "persistence", field)
+				if err != nil {
+					return err
+				}
+				if value != "0" {
+					return fmt.Errorf("%s %s=%s", slowPod, field, value)
+				}
+			}
+			return nil
+		}, time.Minute, 2*time.Second).Should(Succeed())
+
+		By("deleting every pod")
+		deletedAt := time.Now()
+		_, err = kubectl(append([]string{"delete", "pod"}, pods...)...)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for the node to start loading its dataset")
+		var loadingSeenAt time.Time
+		Eventually(func() error {
+			loading, err := valkeyInfoField(slowPod, "persistence", "loading")
+			if err != nil {
+				return err
+			}
+			if loading != "1" {
+				return fmt.Errorf("%s loading=%s", slowPod, loading)
+			}
+			loadingSeenAt = time.Now()
+			return nil
+		}, 2*time.Minute, time.Second).Should(Succeed())
+
+		By("waiting for the dataset to finish loading")
+		Eventually(func() (string, error) {
+			return valkeyInfoField(slowPod, "persistence", "loading")
+		}, 4*time.Minute, time.Second).Should(Equal("0"))
+		loadDuration := time.Since(loadingSeenAt)
+		_, _ = fmt.Fprintf(GinkgoWriter, "%s loaded its dataset in %.0fs\n", slowPod, loadDuration.Seconds())
+		Expect(loadDuration).To(BeNumerically(">", legacyMeetWindowSeconds*time.Second),
+			"the dataset loaded in %.0fs, which does not outlast the %ds meet window this test is meant to exceed", loadDuration.Seconds(), legacyMeetWindowSeconds)
+
+		By("waiting for the cluster to reform")
+		Eventually(verifyClusterState(slowLoadClusterName, 2, 0, ""), 3*time.Minute, 5*time.Second).Should(Succeed())
+		Eventually(verifyPodsStartedWithoutRestarts(slowLoadClusterName), time.Minute, 2*time.Second).Should(Succeed())
+		recovery := time.Since(deletedAt)
+		_, _ = fmt.Fprintf(GinkgoWriter, "every pod started and ready %.0fs after deleting every pod\n", recovery.Seconds())
+		Expect(recovery).To(BeNumerically("<", startupFailOpenSeconds*time.Second),
+			"recovery took %.0fs: the nodes only re-met through the %ds fail-open timeout", recovery.Seconds(), startupFailOpenSeconds)
+
+		By("verifying the keys survived")
+		out, err := execInValkey(slowPod, "valkey-cli", "DBSIZE")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(string(out))).To(Equal(strconv.Itoa(slowLoadKeys)))
 	})
 })
