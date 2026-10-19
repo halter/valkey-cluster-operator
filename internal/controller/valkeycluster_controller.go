@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -71,6 +72,8 @@ const (
 	typeProvisioningValkeyCluster = "Provisioning"
 	// typeStorageLimitedValkeyCluster represents the status used when the disk auto-scaler cannot grow the volumes any further.
 	typeStorageLimitedValkeyCluster = "StorageLimited"
+	// typeResourcesLimitedValkeyCluster represents the status used when usage needs more CPU or memory than spec.autoscaling.maxResources allows.
+	typeResourcesLimitedValkeyCluster = "ResourcesLimited"
 )
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
@@ -80,6 +83,10 @@ type ValkeyClusterReconciler struct {
 	Recorder   record.EventRecorder
 	RestConfig *rest.Config
 	ClientSet  *kubernetes.Clientset
+
+	// cpuSamples holds the last CPU reading of each pod, keyed by the
+	// cluster's types.NamespacedName, so CPU usage can be measured as a rate.
+	cpuSamples sync.Map
 }
 
 // +kubebuilder:rbac:groups=cache.halter.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -88,7 +95,9 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods/resize,verbs=patch
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
@@ -239,6 +248,24 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if res != nil {
 		return *res, nil
+	}
+
+	res, err = r.reconcileResourceAutoScaling(ctx, req, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile resource auto-scaling")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
+	}
+
+	podsNeedingRestart, resized, err := r.reconcilePodRevisions(ctx, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile pod revisions")
+		return ctrl.Result{}, err
+	}
+	if resized {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// wait for all pods to be running and accessible via valkey-client
@@ -807,7 +834,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Drive the rolling update one pod at a time, gated on cluster health.
-	res, err = r.performRollingUpdate(ctx, valkeyCluster)
+	res, err = r.performRollingUpdate(ctx, valkeyCluster, podsNeedingRestart)
 	if err != nil {
 		log.Error(err, "Failed to perform rolling update")
 		return ctrl.Result{}, err
@@ -1463,6 +1490,8 @@ func (r *ValkeyClusterReconciler) doFinalizerOperationsForValkeyCluster(cr *cach
 	// are defined as dependent of the custom resource. See that we use the method ctrl.SetControllerReference.
 	// to set the ownerRef which means that the StatefulSet will be deleted by the Kubernetes API.
 	// More info: https://kubernetes.io/docs/tasks/administer-cluster/use-cascading-deletion/
+
+	r.cpuSamples.Delete(client.ObjectKeyFromObject(cr))
 
 	// The following implementation will raise an event
 	r.Recorder.Event(cr, "Warning", "Deleting",

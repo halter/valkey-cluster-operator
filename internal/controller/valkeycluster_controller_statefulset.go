@@ -10,6 +10,7 @@ import (
 	cachev1alpha1 "github.com/halter/valkey-cluster-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -17,7 +18,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -124,9 +124,9 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 					Containers: []corev1.Container{
 						{
 							Image:           valkeyCluster.Spec.Image,
-							Name:            "valkey-cluster-node",
+							Name:            valkeyContainerName,
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Resources:       *valkeyCluster.Spec.Resources,
+							Resources:       effectiveResources(valkeyCluster),
 
 							// Ensure restrictive context for the container
 							// More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
@@ -404,16 +404,10 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 			return &ctrl.Result{Requeue: true}, nil
 		}
 
-		foundResources := found.Spec.Template.Spec.Containers[0].Resources
-		log.Info(fmt.Sprintf("StatefulSet resources: %v", foundResources))
-
-		foundRequests := foundResources.Requests
-		foundLimits := foundResources.Limits
-
-		if foundRequests == nil || foundLimits == nil {
+		desiredResources := effectiveResources(valkeyCluster)
+		if !equality.Semantic.DeepEqual(found.Spec.Template.Spec.Containers[0].Resources, desiredResources) {
 			err := r.updateStatefulSet(ctx, valkeyCluster.Namespace, stsName, func(ss *appsv1.StatefulSet) *appsv1.StatefulSet {
-				ss.Spec.Template.Spec.Containers[0].Resources.Requests = valkeyCluster.Spec.Resources.Requests
-				ss.Spec.Template.Spec.Containers[0].Resources.Limits = valkeyCluster.Spec.Resources.Limits
+				ss.Spec.Template.Spec.Containers[0].Resources = desiredResources
 				return ss
 			})
 			if err != nil {
@@ -421,54 +415,8 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 				return &ctrl.Result{}, err
 			}
 			r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-				fmt.Sprintf("StatefulSet resources requests %s/%s is updated", found.Namespace, found.Name))
+				fmt.Sprintf("StatefulSet resources %s/%s is updated", found.Namespace, found.Name))
 			return &ctrl.Result{Requeue: true}, nil
-		} else {
-			// for now, we only implement scaling up of CPU and memory
-			requestOrLimitChange := false
-			var cpuRequest, memoryRequest, cpuLimit, memoryLimit resource.Quantity
-			if foundRequests.Cpu().Cmp(*valkeyCluster.Spec.Resources.Requests.Cpu()) == -1 {
-				requestOrLimitChange = true
-				cpuRequest = *valkeyCluster.Spec.Resources.Requests.Cpu()
-			} else {
-				cpuRequest = *foundRequests.Cpu()
-			}
-			if foundRequests.Memory().Cmp(*valkeyCluster.Spec.Resources.Requests.Memory()) == -1 {
-				requestOrLimitChange = true
-				memoryRequest = *valkeyCluster.Spec.Resources.Requests.Memory()
-			} else {
-				memoryRequest = *foundRequests.Memory()
-			}
-			if foundLimits.Cpu().Cmp(*valkeyCluster.Spec.Resources.Limits.Cpu()) == -1 {
-				requestOrLimitChange = true
-				cpuLimit = *valkeyCluster.Spec.Resources.Limits.Cpu()
-			} else {
-				cpuLimit = *foundLimits.Cpu()
-			}
-			if foundLimits.Memory().Cmp(*valkeyCluster.Spec.Resources.Limits.Memory()) == -1 {
-				requestOrLimitChange = true
-				memoryLimit = *valkeyCluster.Spec.Resources.Limits.Memory()
-			} else {
-				memoryLimit = *foundLimits.Memory()
-			}
-			if requestOrLimitChange {
-				err := r.updateStatefulSet(ctx, valkeyCluster.Namespace, stsName, func(ss *appsv1.StatefulSet) *appsv1.StatefulSet {
-					ss.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
-						corev1.ResourceCPU:    cpuRequest,
-						corev1.ResourceMemory: memoryRequest,
-					}
-					ss.Spec.Template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
-						corev1.ResourceCPU:    cpuLimit,
-						corev1.ResourceMemory: memoryLimit,
-					}
-					return ss
-				})
-				if err != nil {
-					log.Error(err, fmt.Sprintf("Failed to update statefulset %s/%s requests and limits", valkeyCluster.Namespace, stsName))
-					return &ctrl.Result{}, err
-				}
-				return &ctrl.Result{Requeue: true}, nil
-			}
 		}
 
 		if found.Spec.MinReadySeconds != valkeyCluster.Spec.MinReadySeconds {
@@ -561,70 +509,17 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 	}
 }
 
-// performRollingUpdate identifies pods that are on an outdated StatefulSet revision and deletes
-// one pod per shard per reconcile, only after verifying the Valkey cluster is fully healthy.
-// Because the StatefulSets use OnDelete update strategy, Kubernetes will not restart pods
-// automatically; this method drives the rollout. Processing one pod per shard in parallel
-// keeps the rollout fast while maintaining cluster safety.
-func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (*ctrl.Result, error) {
-	stsList := &appsv1.StatefulSetList{}
-	listOpts := []client.ListOption{
-		client.InNamespace(valkeyCluster.Namespace),
-		client.MatchingLabels(labelsForValkeyCluster(valkeyCluster.Name)),
+// performRollingUpdate restarts the pods reconcilePodRevisions could not move
+// to their StatefulSet's update revision in place, one pod per reconcile,
+// gated on cluster health. Because the StatefulSets use the OnDelete update
+// strategy, Kubernetes does not restart pods itself. The pods all belong to
+// one StatefulSet, so one shard is fully updated before the next is touched.
+func (r *ValkeyClusterReconciler) performRollingUpdate(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, pods []corev1.Pod) (*ctrl.Result, error) {
+	if len(pods) == 0 {
+		return nil, nil
 	}
-	if err := r.List(ctx, stsList, listOpts...); err != nil {
-		return nil, err
-	}
-
-	// Process shards in a deterministic order so that shard N is fully updated
-	// before shard N+1 is touched. This avoids simultaneous disruption across
-	// multiple shards.
-	sort.Slice(stsList.Items, func(i, j int) bool {
-		return stsList.Items[i].Name < stsList.Items[j].Name
-	})
-
-	for _, sts := range stsList.Items {
-		if sts.Status.UpdateRevision == "" || sts.Status.UpdateRevision == sts.Status.CurrentRevision {
-			continue
-		}
-
-		podList := &corev1.PodList{}
-		podListOpts := []client.ListOption{
-			client.InNamespace(valkeyCluster.Namespace),
-			client.MatchingLabels(map[string]string{
-				"statefulset.kubernetes.io/sts-name": sts.Name,
-				"cache/name":                         valkeyCluster.Name,
-			}),
-		}
-		if err := r.List(ctx, podList, podListOpts...); err != nil {
-			return nil, err
-		}
-
-		var podsNeedingUpdate []corev1.Pod
-		for _, pod := range podList.Items {
-			// Skip pods that are already being deleted — they will be recreated by
-			// the StatefulSet controller with the new template. Counting them here
-			// would cause a second deletion to be scheduled before the first one
-			// completes, leading to cascade deletions.
-			if pod.DeletionTimestamp != nil {
-				continue
-			}
-			if pod.Labels["controller-revision-hash"] != sts.Status.UpdateRevision {
-				podsNeedingUpdate = append(podsNeedingUpdate, pod)
-			}
-		}
-		if len(podsNeedingUpdate) == 0 {
-			continue
-		}
-
-		// Delete one pod, gated on cluster health — we only ever delete one pod
-		// per reconcile cycle, and we complete one shard before advancing to
-		// the next.
-		return r.deleteOnePodHealthGated(ctx, valkeyCluster, podsNeedingUpdate,
-			"RollingUpdate", "rolling update", fmt.Sprintf(" in shard %s", sts.Name))
-	}
-
-	return nil, nil
+	return r.deleteOnePodHealthGated(ctx, valkeyCluster, pods,
+		"RollingUpdate", "rolling update", fmt.Sprintf(" in shard %s", pods[0].Labels[statefulSetNameLabel]))
 }
 
 // performConfigRestarts deletes pods whose runtime config cannot be converged

@@ -46,6 +46,28 @@ spec:
                 items:
                   type: string
                 type: array
+              autoscaling:
+                description: |-
+                  Autoscaling grows and shrinks the CPU and memory of the valkey container
+                  with usage. spec.resources is the initial and minimum size.
+                properties:
+                  maxResources:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      MaxResources turns on auto-scaling for each resource it names and caps
+                      its size. The size of a resource is its limit in spec.resources, or its
+                      request when spec.resources sets no limit for it. Requests and limits
+                      scale together, keeping the ratio set in spec.resources.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: only cpu and memory can be auto-scaled
+                      rule: self.all(k, k == 'cpu' || k == 'memory')
+                type: object
               image:
                 description: Valkey docker image to use
                 type: string
@@ -430,9 +452,26 @@ spec:
                     type: string
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: each auto-scaled resource needs a request or limit in spec.resources
+              rule: '!has(self.autoscaling) || !has(self.autoscaling.maxResources)
+                || self.autoscaling.maxResources.all(k, has(self.resources) && ((has(self.resources.limits)
+                && k in self.resources.limits) || (has(self.resources.requests) &&
+                k in self.resources.requests)))'
           status:
             description: ValkeyClusterStatus defines the observed state of ValkeyCluster
             properties:
+              autoscaledResources:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  AutoscaledResources is the current size of each auto-scaled resource,
+                  between its size in spec.resources and spec.autoscaling.maxResources.
+                type: object
               cluster_nodes:
                 additionalProperties:
                   items:
@@ -513,6 +552,12 @@ spec:
                   - type
                   type: object
                 type: array
+              lastResourceScaleTime:
+                description: |-
+                  LastResourceScaleTime is when usage or an OOM kill last changed an
+                  auto-scaled resource. Scaling down waits 30 minutes after it.
+                format: date-time
+                type: string
               storageSize:
                 anyOf:
                 - type: integer

@@ -2,6 +2,7 @@ package valkey
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -706,4 +707,62 @@ func TestUncoveredSlotRanges(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, &ClusterSlotRange{0, 16383}, got[0])
 	})
+}
+
+// Captured from valkey-server 9.1.2 with `INFO server memory cpu`, with the
+// process id and file paths removed.
+const infoServerMemoryCPU = "# Server\r\n" +
+	"redis_version:7.2.4\r\n" +
+	"server_name:valkey\r\n" +
+	"valkey_version:9.1.2\r\n" +
+	"run_id:cc90f3d22c48d64273cf723f89abaca64e7163ce\r\n" +
+	"tcp_port:6391\r\n" +
+	"uptime_in_seconds:0\r\n" +
+	"\r\n" +
+	"# Memory\r\n" +
+	"used_memory:941920\r\n" +
+	"used_memory_rss:11186176\r\n" +
+	"used_memory_rss_human:10.67M\r\n" +
+	"maxmemory:0\r\n" +
+	"\r\n" +
+	"# CPU\r\n" +
+	"used_cpu_sys:0.000000\r\n" +
+	"used_cpu_user:0.003113\r\n" +
+	"used_cpu_sys_children:0.000000\r\n" +
+	"used_cpu_user_children:0.000000\r\n" +
+	"used_cpu_sys_main_thread:0.000000\r\n" +
+	"used_cpu_user_main_thread:0.002963\r\n"
+
+func TestParseInfoResources(t *testing.T) {
+	for name, in := range map[string]string{
+		"plain":             infoServerMemoryCPU,
+		"verbatim (RESP3)":  "txt:" + infoServerMemoryCPU,
+		"newline endings":   strings.ReplaceAll(infoServerMemoryCPU, "\r\n", "\n"),
+		"children cpu time": strings.Replace(infoServerMemoryCPU, "used_cpu_user_children:0.000000", "used_cpu_user_children:2.000000", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			info, err := ParseInfoResources(in)
+			require.NoError(t, err)
+			assert.Equal(t, "cc90f3d22c48d64273cf723f89abaca64e7163ce", info.RunID)
+			assert.Equal(t, int64(11186176), info.UsedMemoryRSS)
+			want := 0.003113
+			if name == "children cpu time" {
+				want += 2
+			}
+			assert.InDelta(t, want, info.UsedCPUSeconds, 1e-9)
+		})
+	}
+
+	for _, field := range []string{"run_id", "used_memory_rss", "used_cpu_sys", "used_cpu_user", "used_cpu_sys_children", "used_cpu_user_children"} {
+		t.Run("missing "+field, func(t *testing.T) {
+			var kept []string
+			for _, line := range strings.Split(infoServerMemoryCPU, "\r\n") {
+				if !strings.HasPrefix(line, field+":") {
+					kept = append(kept, line)
+				}
+			}
+			_, err := ParseInfoResources(strings.Join(kept, "\r\n"))
+			assert.Error(t, err)
+		})
+	}
 }

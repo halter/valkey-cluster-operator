@@ -86,15 +86,13 @@ func imageSupportsManagedDefaults(image string) bool {
 }
 
 func specMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster) int64 {
-	if valkeyCluster.Spec.Resources == nil {
-		return 0
-	}
-	return valkeyCluster.Spec.Resources.Limits.Memory().Value()
+	resources := effectiveResources(valkeyCluster)
+	return resources.Limits.Memory().Value()
 }
 
 func podMemoryLimitBytes(valkeyCluster *cachev1alpha1.ValkeyCluster, pod *corev1.Pod) int64 {
 	for _, container := range pod.Spec.Containers {
-		if container.Name != "valkey-cluster-node" {
+		if container.Name != valkeyContainerName {
 			continue
 		}
 		if v := container.Resources.Limits.Memory().Value(); v > 0 {
@@ -119,8 +117,8 @@ func managedConfigEntries(valkeyCluster *cachev1alpha1.ValkeyCluster) []cachev1a
 }
 
 // managedConfigEntriesForPod sizes the defaults from the pod's actual
-// container memory limit, which can lag spec.resources until the pod is
-// replaced by the rolling update.
+// container memory limit, which can lag the StatefulSet template until the
+// pod is resized or replaced.
 func managedConfigEntriesForPod(valkeyCluster *cachev1alpha1.ValkeyCluster, pod *corev1.Pod) []cachev1alpha1.ValkeyConfigParameter {
 	return appendSpecParameters(valkeyCluster,
 		managedDefaultParametersForMemory(valkeyCluster, podMemoryLimitBytes(valkeyCluster, pod)))

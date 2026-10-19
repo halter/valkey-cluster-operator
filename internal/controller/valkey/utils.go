@@ -441,6 +441,50 @@ func ParseInfoReplication(infoTxt string) ReplicationInfo {
 	return info
 }
 
+// ResourceInfo holds the fields of INFO server, memory and cpu that measure
+// how much CPU and memory a node uses.
+type ResourceInfo struct {
+	// RunID identifies the server process and changes when it restarts.
+	RunID string
+	// UsedMemoryRSS is the resident set size of the process in bytes.
+	UsedMemoryRSS int64
+	// UsedCPUSeconds is the CPU time used by the process and its children.
+	UsedCPUSeconds float64
+}
+
+// ParseInfoResources parses the output of INFO server memory cpu. A missing
+// or malformed field is an error, so a partial reply never reads as an idle
+// node.
+func ParseInfoResources(infoTxt string) (ResourceInfo, error) {
+	fields := map[string]string{}
+	for _, line := range strings.Split(strings.TrimPrefix(infoTxt, "txt:"), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if key, val, ok := strings.Cut(line, ":"); ok {
+			fields[key] = val
+		}
+	}
+	info := ResourceInfo{RunID: fields["run_id"]}
+	if info.RunID == "" {
+		return ResourceInfo{}, errors.New("INFO reply has no run_id")
+	}
+	rss, err := strconv.ParseInt(fields["used_memory_rss"], 10, 64)
+	if err != nil {
+		return ResourceInfo{}, fmt.Errorf("parsing used_memory_rss: %w", err)
+	}
+	info.UsedMemoryRSS = rss
+	for _, key := range []string{"used_cpu_sys", "used_cpu_user", "used_cpu_sys_children", "used_cpu_user_children"} {
+		seconds, err := strconv.ParseFloat(fields[key], 64)
+		if err != nil {
+			return ResourceInfo{}, fmt.Errorf("parsing %s: %w", key, err)
+		}
+		info.UsedCPUSeconds += seconds
+	}
+	return info, nil
+}
+
 func TcpCheck(host, port string) bool {
 	// check tcp port
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 2*time.Second)
