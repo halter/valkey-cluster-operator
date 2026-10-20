@@ -8,7 +8,10 @@ environment.
 
 The operator provides the following features:
 
-- Scaling up and down of CPU, memory and storage sizes.
+- Scaling up and down of CPU, memory and storage sizes. Pods are resized in
+place when the cluster supports it.
+- Automatic CPU and memory scaling: opt in per resource and pods grow and
+shrink with usage up to a maximum you set.
 - Scaling up and down the number of replicas per shard in the cluster
 - Resharding up and down, you can change the number of shards in a cluster and
 the Operator will handle resharding the slots for you.
@@ -53,6 +56,61 @@ Notes:
 - AWS EBS allows one modification per volume per ~6 hours; the operator waits
   for an expansion to complete before requesting another one.
 
+## CPU and memory auto-scaling
+
+Auto-scaling is opt-in per resource. Naming a resource in
+`spec.autoscaling.maxResources` turns it on and caps its size:
+
+```yaml
+spec:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+  autoscaling:
+    maxResources:
+      cpu: "2"
+      memory: 4Gi
+```
+
+`spec.resources` is the initial and minimum size. The size of a resource is
+its limit, or its request when it has no limit. Every reconcile, and at least
+every five minutes, the operator runs `INFO` on each valkey container. Memory
+usage is `used_memory_rss`. CPU usage is the rate of the `used_cpu_*`
+counters between two readings at least a minute apart. The highest usage
+across the cluster's pods sizes all of them.
+
+- When usage goes above 75% of the current size, the resource grows so usage
+  fills 50% of it.
+- When usage falls below 25%, the resource shrinks the same way, but only 30
+  minutes after the last scale and never below `spec.resources`.
+- When a valkey container is OOM-killed, memory grows by 50%.
+- New sizes round up to a multiple of 64Mi for memory and 50m for CPU and
+  never exceed `maxResources`. Requests and limits scale together and keep the
+  ratio set in `spec.resources`, so the pod's QoS class never changes.
+
+The current sizes are in `status.autoscaledResources` and the time of the last
+change in `status.lastResourceScaleTime`. Each change emits a
+`ResourceAutoScale` event. When a resource is at its maximum and usage needs
+more, the operator sets the `ResourcesLimited` condition, which clears once
+usage fits.
+
+On Kubernetes 1.33 and later the operator resizes running pods in place
+through the pod `resize` subresource, so valkey keeps running with its data in
+memory. Older API servers have no `resize` subresource. Where the API server
+refuses an in-place change, for example a memory decrease on Kubernetes
+versions that do not allow lowering memory limits in place, or the node cannot
+fit it, the operator falls back to the health-gated rolling restart used for
+image updates. Changes to `spec.resources` reach running
+pods the same way, and decreases are applied too.
+
+A fixed valkey `maxmemory` caps how much memory valkey uses, so memory
+auto-scaling never sees usage above it. Leave `maxmemory` unset or set it with
+the cap in mind.
+
 ## Valkey configuration management
 
 `valkey-server` reads its config file once at process start, and the config
@@ -95,11 +153,11 @@ replication-tuning defaults, derived from the pod memory limit:
 | `repl-backlog-size` | `min(clamp(memory/16, 10MiB, 512MiB), hard)` | The compiled-in 10MiB is seconds of backlog on a busy shard; too small a backlog turns every transient disconnect into a full resync. Capped at the replica hard limit, which valkey otherwise ignores. |
 | `client-output-buffer-limit` | `replica min(memory/2, 4GiB) <hard/2> 120` | The compiled-in 256MiB hard limit kills full syncs of multi-GiB shards; conversely 256MiB exceeds the whole pod on small caches, so the limit never exceeds its memory/2 share. |
 
-The sized values respect each pod's memory limit: the config file is sized
-from `spec.resources.limits.memory`, while the live-apply path sizes from the
-pod's actual container limit — after a limit change, existing pods keep their
-old limit until the rolling update replaces them, and buffers sized from the
-new spec could exceed what such a pod really has.
+The sized values respect each pod's memory limit. The config file is sized
+from the current memory limit, which is `spec.resources.limits.memory` or its
+auto-scaled size. The live-apply path sizes from each pod's own container
+limit, because a pod keeps its old limit until it is resized or replaced, and
+buffers sized from the new limit could exceed what such a pod has.
 
 `spec.valkeyConfig.parameters` entries are applied after the defaults, so a
 per-cluster value always overrides the fleet default. The defaults were sized

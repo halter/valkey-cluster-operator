@@ -19,6 +19,11 @@ spec:
     requests:
       cpu: "0.4"
       memory: 714Mi
+  # CPU and memory grow and shrink with usage, from resources up to maxResources.
+  autoscaling:
+    maxResources:
+      cpu: "2"
+      memory: 4Gi
   # Disk size is managed automatically: volumes start at 1Gi and grow as disk
   # usage increases. storage itself is optional and only needed to pick a
   # storage class or access mode; storageLimit caps the automatic growth.
