@@ -81,6 +81,11 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              requireHostAntiAffinity:
+                default: true
+                description: Require the pods of a shard to run on distinct nodes
+                  (kubernetes.io/hostname anti-affinity is required rather than preferred)
+                type: boolean
               resources:
                 description: Resources requirements and limits for the containers
                 properties:

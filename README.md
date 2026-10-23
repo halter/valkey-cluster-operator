@@ -107,6 +107,31 @@ from the SP-1527 incident (a 9.4GB shard at ~5.4MB/s of replication write
 traffic stuck in a full-resync crash loop for ~6 hours under the compiled-in
 defaults).
 
+## Shard placement and readiness
+
+Every replica of a shard holds the same slots, so a shard survives a node loss
+only while its pods sit on different nodes. The operator renders
+`spec.antiAffinityTopologyKeys` as pod anti-affinity between the pods of each
+shard (one StatefulSet). The `kubernetes.io/hostname` term is **required**
+unless `spec.requireHostAntiAffinity` is `false`; any other key, such as
+`topology.kubernetes.io/zone`, is preferred with weight 100. A preferred
+hostname term is only a scoring hint and lost to the scheduler's
+resource-balancing scores often enough that whole shards landed on one node.
+Required host anti-affinity needs `replicas + 1` schedulable nodes per shard;
+set `requireHostAntiAffinity: false` where the node pool cannot provide that.
+
+The valkey container's readiness probe runs `/scripts/readiness.sh`: a master
+is ready once it answers, a replica only once `master_link_status` is `up`
+and `master_sync_in_progress` is `0`. A replica still receiving its initial
+sync therefore stays out of Service endpoints and counts as unavailable for
+the PodDisruptionBudget, so a node drain cannot evict the last synced copy of
+a shard. Liveness remains a TCP check so a long sync is never killed.
+
+Both settings change the pod template. Upgrading the operator rolls every
+cluster through the operator's health-gated rollout (one pod per shard at a
+time), and the existing `IgnoredDuringExecution` pods only spread out as that
+rollout restarts them.
+
 ## Prerequisites
 
 In order to develop on `valkey-cluster-operator`, you'll want to install the following tools:
