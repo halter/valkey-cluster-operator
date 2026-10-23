@@ -142,6 +142,11 @@ func (in *ValkeyClusterSpec) DeepCopyInto(out *ValkeyClusterSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.RequireHostAntiAffinity != nil {
+		in, out := &in.RequireHostAntiAffinity, &out.RequireHostAntiAffinity
+		*out = new(bool)
+		**out = **in
+	}
 	if in.ValkeyConfig != nil {
 		in, out := &in.ValkeyConfig, &out.ValkeyConfig
 		*out = new(ValkeyConfig)

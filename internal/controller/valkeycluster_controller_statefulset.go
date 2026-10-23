@@ -48,29 +48,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 	ls := labelsForValkeyCluster(valkeyCluster.Name)
 	ls["statefulset.kubernetes.io/sts-name"] = name
 
-	affinityTerms := []corev1.WeightedPodAffinityTerm{}
-	for _, topologyKey := range valkeyCluster.Spec.AntiAffinityTopologyKeys {
-		affinityTerms = append(affinityTerms, corev1.WeightedPodAffinityTerm{
-			Weight: 1,
-			PodAffinityTerm: corev1.PodAffinityTerm{
-				LabelSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						"statefulset.kubernetes.io/sts-name": name,
-						"cache/name":                         valkeyCluster.Name,
-					},
-				},
-				TopologyKey: topologyKey,
-			},
-		})
-	}
-	var affinity *corev1.Affinity
-	if len(affinityTerms) > 0 {
-		affinity = &corev1.Affinity{
-			PodAntiAffinity: &corev1.PodAntiAffinity{
-				PreferredDuringSchedulingIgnoredDuringExecution: affinityTerms,
-			},
-		}
-	}
+	affinity := shardAffinity(name, valkeyCluster)
 
 	metricsContainerArgs := []string{"-is-cluster"}
 	if valkeyCluster.Spec.Password != "" {
@@ -172,14 +150,7 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 									},
 								},
 							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt(VALKEY_PORT),
-									},
-								},
-								InitialDelaySeconds: valkeyCluster.Spec.InitialDelaySeconds,
-							},
+							ReadinessProbe: valkeyReadinessProbe(valkeyCluster.Spec.InitialDelaySeconds),
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									TCPSocket: &corev1.TCPSocketAction{
@@ -288,6 +259,65 @@ func (r *ValkeyClusterReconciler) statefulSet(name string, size int32, valkeyClu
 
 func statefulSetSize(valkeyCluster *cachev1alpha1.ValkeyCluster) int32 {
 	return 1 + valkeyCluster.Spec.Replicas
+}
+
+const hostnameTopologyKey = "kubernetes.io/hostname"
+
+// shardAffinity spreads the pods of one shard across spec.antiAffinityTopologyKeys; the hostname term is required unless spec.requireHostAntiAffinity is false.
+func shardAffinity(stsName string, valkeyCluster *cachev1alpha1.ValkeyCluster) *corev1.Affinity {
+	selector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"statefulset.kubernetes.io/sts-name": stsName,
+			"cache/name":                         valkeyCluster.Name,
+		},
+	}
+	requireHost := valkeyCluster.Spec.RequireHostAntiAffinity == nil || *valkeyCluster.Spec.RequireHostAntiAffinity
+
+	var required []corev1.PodAffinityTerm
+	var preferred []corev1.WeightedPodAffinityTerm
+	if requireHost {
+		required = append(required, corev1.PodAffinityTerm{
+			LabelSelector: selector,
+			TopologyKey:   hostnameTopologyKey,
+		})
+	}
+	for _, topologyKey := range valkeyCluster.Spec.AntiAffinityTopologyKeys {
+		if requireHost && topologyKey == hostnameTopologyKey {
+			continue
+		}
+		preferred = append(preferred, corev1.WeightedPodAffinityTerm{
+			Weight: 100,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				LabelSelector: selector,
+				TopologyKey:   topologyKey,
+			},
+		})
+	}
+	if len(required) == 0 && len(preferred) == 0 {
+		return nil
+	}
+	return &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution:  required,
+			PreferredDuringSchedulingIgnoredDuringExecution: preferred,
+		},
+	}
+}
+
+// valkeyReadinessProbe runs readiness.sh; all fields are set so the desired probe compares equal to the API-server-defaulted one.
+func valkeyReadinessProbe(initialDelaySeconds int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"/bin/sh", "/scripts/readiness.sh"},
+			},
+		},
+		InitialDelaySeconds: initialDelaySeconds,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		SuccessThreshold:    1,
+		FailureThreshold:    3,
+	}
 }
 
 func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req ctrl.Request, valkeyCluster *cachev1alpha1.ValkeyCluster) (*ctrl.Result, error) {
@@ -524,8 +554,12 @@ func (r *ValkeyClusterReconciler) compareActualToDesiredStatefulSet(ctx context.
 		log.Info(fmt.Sprintf("StatefulSet %s Env is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].Env, desired.Spec.Template.Spec.Containers[0].Env)))
 		diff = true
 	}
-	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds) {
-		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe.InitialDelaySeconds is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds, desired.Spec.Template.Spec.Containers[0].ReadinessProbe.InitialDelaySeconds)))
+	if !cmp.Equal(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe) {
+		log.Info(fmt.Sprintf("StatefulSet %s ReadinessProbe is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Containers[0].ReadinessProbe, desired.Spec.Template.Spec.Containers[0].ReadinessProbe)))
+		diff = true
+	}
+	if !cmp.Equal(actual.Spec.Template.Spec.Affinity, desired.Spec.Template.Spec.Affinity) {
+		log.Info(fmt.Sprintf("StatefulSet %s Affinity is different: %s", stsName, cmp.Diff(actual.Spec.Template.Spec.Affinity, desired.Spec.Template.Spec.Affinity)))
 		diff = true
 	}
 
@@ -552,6 +586,7 @@ func (r *ValkeyClusterReconciler) applyDesiredStatefulSetSpec(valkeyCluster *cac
 		ss.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
 		ss.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
 		ss.Spec.Template.Spec.Containers[0].ReadinessProbe = desired.Spec.Template.Spec.Containers[0].ReadinessProbe
+		ss.Spec.Template.Spec.Affinity = desired.Spec.Template.Spec.Affinity
 
 		ss.Spec.Template.Spec.Containers[1].Args = desired.Spec.Template.Spec.Containers[1].Args
 		ss.Spec.Template.Spec.Containers[1].Image = desired.Spec.Template.Spec.Containers[1].Image

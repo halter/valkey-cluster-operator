@@ -84,6 +84,11 @@ type ValkeyClusterSpec struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	AntiAffinityTopologyKeys []string `json:"antiAffinityTopologyKeys,omitempty"`
 
+	// Require the pods of a shard to run on distinct nodes (kubernetes.io/hostname anti-affinity is required rather than preferred)
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// +kubebuilder:default=true
+	RequireHostAntiAffinity *bool `json:"requireHostAntiAffinity,omitempty"`
+
 	// Overwrite the default operator-provided configuration with user-defined config
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	ValkeyConfig *ValkeyConfig `json:"valkeyConfig,omitempty"`
