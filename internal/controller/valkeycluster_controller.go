@@ -422,65 +422,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// cluster meet
-	for _, clusterNodeA := range clusterNodes {
-		for _, clusterNodeB := range clusterNodes {
-			if clusterNodeA.Pod != clusterNodeB.Pod {
-				client, err := r.NewValkeyClient(ctx, valkeyCluster, clusterNodeA.IP, VALKEY_PORT)
-				if err != nil {
-					log.Error(err, "Failed to create Valkey client")
-					return ctrl.Result{}, err
-				}
-				defer client.Close()
-
-				txt, err := client.Do(ctx, client.B().ClusterNodes().Build()).ToString()
-				if err != nil {
-					log.Error(err, "Failed to get cluster nodes")
-					return ctrl.Result{}, err
-				}
-				clusterNodes, err := internalValkey.ParseClusterNodesExludeSelf(txt)
-				if err != nil {
-					log.Error(err, "Failed to parse cluster nodes")
-					return ctrl.Result{}, err
-				}
-				met := false
-				for _, cn := range clusterNodes {
-					if cn.ID == clusterNodeB.ID {
-						met = true
-					}
-				}
-				if met {
-					continue
-				}
-
-				err = client.Do(ctx, client.B().ClusterMeet().Ip(clusterNodeB.IP).Port(int64(VALKEY_PORT)).Build()).Error()
-				if err != nil {
-					log.Error(err, "Failed to do cluster meet")
-					return ctrl.Result{}, err
-				}
-
-				log.Info("Cluster nodes", "ClusterNodes", clusterNodes)
-				clusterNodes, err = r.buildClusterNodes(ctx, valkeyCluster)
-				if err != nil {
-					log.Error(err, "Failed to build cluster nodes")
-					return ctrl.Result{}, err
-				}
-
-				err = r.updateClusterNodesStatus(ctx, req)
-				if err != nil {
-					log.Error(err, "Failed to update ValkeyCluster status")
-					return ctrl.Result{}, err
-				}
-
-				meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
-					Status: metav1.ConditionFalse, Reason: "Reconciling",
-					Message: fmt.Sprintf("Ran cluster meet operation on %s with %d pods", valkeyCluster.Name, len(clusterNodes))})
-
-				if err := r.Status().Update(ctx, valkeyCluster); err != nil {
-					log.Error(err, "Failed to update ValkeyCluster status")
-					return ctrl.Result{}, err
-				}
-			}
-		}
+	if err := r.meetClusterNodes(ctx, req, valkeyCluster, clusterNodes, VALKEY_PORT); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	valkeyCluster = &cachev1alpha1.ValkeyCluster{}
@@ -542,6 +485,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				log.Error(err, "Failed to get client")
 				return ctrl.Result{}, err
 			}
+			defer client.Close()
 			err = client.Do(ctx, client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(expectedSlotRanges.Start), int64(expectedSlotRanges.End)).Build()).Error()
 			if err != nil {
 				log.Error(err, "Failed to add slot range")
@@ -582,6 +526,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 						log.Error(err, "Failed to get client")
 						return ctrl.Result{}, err
 					}
+					defer client.Close()
 					err = client.Do(ctx, client.B().ClusterReplicate().NodeId(primary.ID).Build()).Error()
 					if err != nil {
 						log.Error(err, "Failed to setup replication")
@@ -613,6 +558,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					log.Error(err, "Failed to get client")
 					return ctrl.Result{}, err
 				}
+				defer client.Close()
 				err = client.Do(ctx, client.B().ClusterReplicate().NodeId(primary.ID).Build()).Error()
 				if err != nil {
 					log.Error(err, "Failed to setup replication")
@@ -832,6 +778,79 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Requeue periodically so disk usage keeps being monitored while the
 	// cluster is otherwise stable.
 	return ctrl.Result{RequeueAfter: diskUsagePollInterval}, nil
+}
+
+// meetClusterNodes sends CLUSTER MEET from each node to every node missing
+// from its view of the cluster. It opens one client per node and reads that
+// node's view once. Opening a client for every pair of nodes, each closed only
+// when Reconcile returned, held N*(N-1) connections at once, each with valkey-go's
+// 1 MiB of read and write buffers: 14,280 for a 40-shard cluster with two
+// replicas, which got the operator OOM-killed on every reconcile.
+func (r *ValkeyClusterReconciler) meetClusterNodes(ctx context.Context, req ctrl.Request, valkeyCluster *cachev1alpha1.ValkeyCluster, clusterNodes []*internalValkey.ClusterNode, port int) error {
+	log := log.FromContext(ctx)
+	for _, clusterNodeA := range clusterNodes {
+		client, err := r.NewValkeyClient(ctx, valkeyCluster, clusterNodeA.IP, port)
+		if err != nil {
+			log.Error(err, "Failed to create Valkey client")
+			return err
+		}
+		defer client.Close()
+
+		txt, err := client.Do(ctx, client.B().ClusterNodes().Build()).ToString()
+		if err != nil {
+			log.Error(err, "Failed to get cluster nodes")
+			return err
+		}
+		knownNodes, err := internalValkey.ParseClusterNodesExludeSelf(txt)
+		if err != nil {
+			log.Error(err, "Failed to parse cluster nodes")
+			return err
+		}
+
+		for _, clusterNodeB := range clusterNodes {
+			if clusterNodeA.Pod == clusterNodeB.Pod {
+				continue
+			}
+			met := false
+			for _, cn := range knownNodes {
+				if cn.ID == clusterNodeB.ID {
+					met = true
+				}
+			}
+			if met {
+				continue
+			}
+
+			err = client.Do(ctx, client.B().ClusterMeet().Ip(clusterNodeB.IP).Port(int64(port)).Build()).Error()
+			if err != nil {
+				log.Error(err, "Failed to do cluster meet")
+				return err
+			}
+
+			log.Info("Cluster nodes", "ClusterNodes", knownNodes)
+			builtNodes, err := r.buildClusterNodes(ctx, valkeyCluster)
+			if err != nil {
+				log.Error(err, "Failed to build cluster nodes")
+				return err
+			}
+
+			err = r.updateClusterNodesStatus(ctx, req)
+			if err != nil {
+				log.Error(err, "Failed to update ValkeyCluster status")
+				return err
+			}
+
+			meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
+				Status: metav1.ConditionFalse, Reason: "Reconciling",
+				Message: fmt.Sprintf("Ran cluster meet operation on %s with %d pods", valkeyCluster.Name, len(builtNodes))})
+
+			if err := r.Status().Update(ctx, valkeyCluster); err != nil {
+				log.Error(err, "Failed to update ValkeyCluster status")
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // isValkeyClusterHealthy returns true only when every pod in the cluster is Running and Ready
