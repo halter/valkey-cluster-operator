@@ -124,6 +124,7 @@ spec:
   image: valkey-server:8.0.5
   shards: %d
   replicas: %d
+  requireHostAntiAffinity: false # the kind e2e cluster has one node
   minReadySeconds: 5
   resources:
     limits:
