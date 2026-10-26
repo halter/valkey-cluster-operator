@@ -241,6 +241,69 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return *res, nil
 	}
 
+	// Disk auto-scaling and the PVC size check run before the pod wait below
+	// on purpose: neither depends on Valkey topology, and a pod that is Pending
+	// or still syncing must not stop a filling volume from growing. Keeping
+	// them here means a stalled rollout cannot turn into a write outage.
+	// The new size target lands in status and is applied by the PVC check below.
+	res, err = r.reconcileDiskAutoScaling(ctx, req, valkeyCluster)
+	if err != nil {
+		log.Error(err, "Failed to reconcile disk auto-scaling")
+		return ctrl.Result{}, err
+	}
+	if res != nil {
+		return *res, nil
+	}
+
+	// check if pvs already exist, they should be created by the statefulset
+	desiredStorage := desiredStorageSize(valkeyCluster)
+	for stsIdx := 0; stsIdx < int(valkeyCluster.Spec.Shards); stsIdx++ {
+		for pvcIdx := 0; pvcIdx < int(statefulSetSize(valkeyCluster)); pvcIdx++ {
+			pvcName := fmt.Sprintf("valkey-data-%s-%d-%d", valkeyCluster.Name, stsIdx, pvcIdx)
+			found := &corev1.PersistentVolumeClaim{}
+			err = r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: valkeyCluster.Namespace}, found)
+			if err != nil && apierrors.IsNotFound(err) {
+				log.Info("PVC not found, requeuing", "PVC", pvcName)
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			} else if err != nil {
+				log.Error(err, "Failed to get PersistentVolumeClaims")
+				// Let's return the error for the reconciliation be re-trigged again
+				return ctrl.Result{}, err
+			}
+
+			if found.Spec.Resources.Requests.Storage().Cmp(desiredStorage) == -1 {
+				found.Spec.Resources.Requests[corev1.ResourceStorage] = desiredStorage
+				if err = r.Update(ctx, found); err != nil {
+					log.Error(err, "Failed to update PersistentVolumeClaim",
+						"PersistentVolumeClaim.Namespace", found.Namespace, "PersistentVolumeClaim.Name", found.Name)
+
+					// Re-fetch the valkeyCluster Custom Resource before updating the status
+					// so that we have the latest state of the resource on the cluster and we will avoid
+					// raising the error "the object has been modified, please apply
+					// your changes to the latest version and try again" which would re-trigger the reconciliation
+					if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
+						log.Error(err, "Failed to re-fetch valkeyCluster")
+						return ctrl.Result{}, err
+					}
+
+					// The following implementation will update the status
+					meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
+						Status: metav1.ConditionFalse, Reason: "Resizing",
+						Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", valkeyCluster.Name, err)})
+
+					if err := r.Status().Update(ctx, valkeyCluster); err != nil {
+						log.Error(err, "Failed to update ValkeyCluster status")
+						return ctrl.Result{}, err
+					}
+					return ctrl.Result{}, err
+				}
+				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
+					fmt.Sprintf("PersistentVolumeClaim %s/%s is updated", found.Namespace, found.Name))
+				return ctrl.Result{Requeue: true}, nil
+			}
+		}
+	}
+
 	// wait for all pods to be running and accessible via valkey-client
 	res, err = r.waitForPodsToBeAccessibleViaValkey(ctx, valkeyCluster)
 	if err != nil {
@@ -342,66 +405,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			r.Recorder.Event(valkeyCluster, "Normal", "Deleted",
 				fmt.Sprintf("StatefulSet %s/%s is deleted", lastSts.Namespace, lastSts.Name))
 			return ctrl.Result{Requeue: true}, nil
-		}
-	}
-
-	// Monitor disk usage and grow the cluster-wide volume size when needed.
-	// The new target lands in status and is applied by the PVC check below.
-	res, err = r.reconcileDiskAutoScaling(ctx, req, valkeyCluster)
-	if err != nil {
-		log.Error(err, "Failed to reconcile disk auto-scaling")
-		return ctrl.Result{}, err
-	}
-	if res != nil {
-		return *res, nil
-	}
-
-	// check if pvs already exist, they should be created by the statefulset
-	desiredStorage := desiredStorageSize(valkeyCluster)
-	for stsIdx := 0; stsIdx < int(valkeyCluster.Spec.Shards); stsIdx++ {
-		for pvcIdx := 0; pvcIdx < int(statefulSetSize(valkeyCluster)); pvcIdx++ {
-			pvcName := fmt.Sprintf("valkey-data-%s-%d-%d", valkeyCluster.Name, stsIdx, pvcIdx)
-			found := &corev1.PersistentVolumeClaim{}
-			err = r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: valkeyCluster.Namespace}, found)
-			if err != nil && apierrors.IsNotFound(err) {
-				log.Info("PVC not found, requeuing", "PVC", pvcName)
-				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-			} else if err != nil {
-				log.Error(err, "Failed to get PersistentVolumeClaims")
-				// Let's return the error for the reconciliation be re-trigged again
-				return ctrl.Result{}, err
-			}
-
-			if found.Spec.Resources.Requests.Storage().Cmp(desiredStorage) == -1 {
-				found.Spec.Resources.Requests[corev1.ResourceStorage] = desiredStorage
-				if err = r.Update(ctx, found); err != nil {
-					log.Error(err, "Failed to update PersistentVolumeClaim",
-						"PersistentVolumeClaim.Namespace", found.Namespace, "PersistentVolumeClaim.Name", found.Name)
-
-					// Re-fetch the valkeyCluster Custom Resource before updating the status
-					// so that we have the latest state of the resource on the cluster and we will avoid
-					// raising the error "the object has been modified, please apply
-					// your changes to the latest version and try again" which would re-trigger the reconciliation
-					if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
-						log.Error(err, "Failed to re-fetch valkeyCluster")
-						return ctrl.Result{}, err
-					}
-
-					// The following implementation will update the status
-					meta.SetStatusCondition(&valkeyCluster.Status.Conditions, metav1.Condition{Type: typeAvailableValkeyCluster,
-						Status: metav1.ConditionFalse, Reason: "Resizing",
-						Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", valkeyCluster.Name, err)})
-
-					if err := r.Status().Update(ctx, valkeyCluster); err != nil {
-						log.Error(err, "Failed to update ValkeyCluster status")
-						return ctrl.Result{}, err
-					}
-					return ctrl.Result{}, err
-				}
-				r.Recorder.Event(valkeyCluster, "Normal", "Updated",
-					fmt.Sprintf("PersistentVolumeClaim %s/%s is updated", found.Namespace, found.Name))
-				return ctrl.Result{Requeue: true}, nil
-			}
 		}
 	}
 

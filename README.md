@@ -120,12 +120,19 @@ resource-balancing scores often enough that whole shards landed on one node.
 Required host anti-affinity needs `replicas + 1` schedulable nodes per shard;
 set `requireHostAntiAffinity: false` where the node pool cannot provide that.
 
-The valkey container's readiness probe runs `/scripts/readiness.sh`: a master
-is ready once it answers, a replica only once `master_link_status` is `up`
-and `master_sync_in_progress` is `0`. A replica still receiving its initial
-sync therefore stays out of Service endpoints and counts as unavailable for
-the PodDisruptionBudget, so a node drain cannot evict the last synced copy of
-a shard. Liveness remains a TCP check so a long sync is never killed.
+The valkey container's readiness probe runs `/scripts/readiness.sh`. A node
+that is still loading its dataset (`loading` is `1` in `INFO persistence`) is
+not ready whatever its role. Once loaded, a master is ready as soon as it
+answers; a replica only once `master_link_status` is `up` and
+`master_sync_in_progress` is `0`. A replica still receiving its initial sync
+therefore stays out of Service endpoints and counts as unavailable for the
+PodDisruptionBudget, so a node drain cannot evict the last synced copy of a
+shard. Liveness remains a TCP check so a long sync is never killed.
+
+The pre-stop hook of a master fails over to the online replica with the
+highest replication offset before the pod stops, so a replica that is still
+syncing is never chosen and a syncing first replica no longer skips the
+failover.
 
 Both settings change the pod template. Upgrading the operator rolls every
 cluster through the operator's health-gated rollout (one pod per shard at a

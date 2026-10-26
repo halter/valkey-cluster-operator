@@ -26,14 +26,33 @@ if [ "${CONNECTED_REPLICAS:-0}" -le "0" ]; then
 	exit 0
 fi
 
-SLAVE0="$(valkey_cli 127.0.0.1 6379 -c info replication | awk -F: '/^slave0:/ { print $2 }')"
-SLAVE_IP="$(echo "${SLAVE0}" | tr , '\n' | awk -F= '/^ip/ { print $2 }')"
-SLAVE_PORT="$(echo "${SLAVE0}" | tr , '\n' | awk -F= '/^port/ { print $2 }')"
-SLAVE_STATUS="$(echo "${SLAVE0}" | tr , '\n' | awk -F= '/^state/ { print $2 }')"
-if [ "${SLAVE_STATUS}" != "online" ]; then
-	surface "skipping failover: replica ${SLAVE_IP}:${SLAVE_PORT} state is '${SLAVE_STATUS}', not online"
+# Pick the online replica with the highest replication offset. A replica still
+# receiving its initial sync reports state=wait_bgsave or send_bulk and cannot
+# be promoted, so looking only at the first listed replica would skip the
+# failover whenever that one happens to be the one mid-sync.
+REPLICA="$(valkey_cli 127.0.0.1 6379 -c info replication | tr -d '\r' | awk -F: '/^slave[0-9]+:/ { print $2 }' | tr , ' ' | awk '
+	{
+		ip = ""; port = ""; state = ""; offset = -1
+		for (i = 1; i <= NF; i++) {
+			split($i, kv, "=")
+			if (kv[1] == "ip") ip = kv[2]
+			if (kv[1] == "port") port = kv[2]
+			if (kv[1] == "state") state = kv[2]
+			if (kv[1] == "offset") offset = kv[2] + 0
+		}
+		if (state == "online" && ip != "" && port != "" && offset > best) {
+			best = offset; pick = ip " " port
+		}
+	}
+	BEGIN { best = -1; pick = "" }
+	END { print pick }')"
+
+if [ -z "${REPLICA}" ]; then
+	surface "skipping failover: none of the ${CONNECTED_REPLICAS} connected replicas is online yet"
 	exit 0
 fi
+SLAVE_IP="${REPLICA% *}"
+SLAVE_PORT="${REPLICA#* }"
 
 surface "initiating failover to replica ${SLAVE_IP}:${SLAVE_PORT}"
 valkey_cli "$SLAVE_IP" "$SLAVE_PORT" -c cluster failover
