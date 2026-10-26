@@ -7,39 +7,24 @@ msg() {
 	echo "$(date --rfc-3339=seconds): ${CONTEXT} - ${MSG}" >>"/data/logs/${CONTEXT}.log"
 }
 
+# valkey_cli HOST PORT ARGS...: run valkey-cli against HOST:PORT, authenticating
+# when the cluster has a password. The password goes through REDISCLI_AUTH,
+# which every valkey-cli since 8.0 reads (9.x prefers VALKEYCLI_AUTH and falls
+# back to it), rather than -a: -a shows the password in the process list and
+# this function used to write it into /data/logs/valkey_cli.log on every call.
 valkey_cli() {
 	msg valkey_cli begin
 
 	IP=$1
 	PORT=$2
 	shift 2
-	ARGS=$@
 
-	msg valkey_cli "valkey-cli -h $IP -p $PORT info"
-	result=$(valkey-cli -h "$IP" -p "$PORT" info)
-	msg valkey_cli "result: $result"
-
-	if echo "$result" | grep -q "NOAUTH"; then
-		msg valkey_cli "AUTH_REQUIRED=true"
-		AUTH_REQUIRED=true
+	if [ -s /scripts/password ]; then
+		REDISCLI_AUTH="$(cat /scripts/password)"
+		export REDISCLI_AUTH
 	fi
 
-	if [ "$AUTH_REQUIRED" = "true" ]; then
-		msg valkey_cli "valkey-cli -h $IP -p $PORT -a $(cat /scripts/password) info"
-		result=$(valkey-cli -h "$IP" -p "$PORT" -a "$(cat /scripts/password)" info)
-		msg valkey_cli "result: $result"
-		if echo "$result" | grep -q "ERR invalid password"; then
-			msg valkey_cli end
-			exit 0
-		fi
-	fi
-
-	VALKEY_CMD="valkey-cli -h ${IP} -p ${PORT}"
-	if [ "$AUTH_REQUIRED" = "true" ]; then
-		VALKEY_CMD="$VALKEY_CMD -a $(cat /scripts/password)"
-	fi
-
-	msg valkey_cli "$VALKEY_CMD $ARGS"
-	$VALKEY_CMD $ARGS
+	msg valkey_cli "valkey-cli -h $IP -p $PORT $*"
+	valkey-cli -h "$IP" -p "$PORT" --no-auth-warning "$@"
 	msg valkey_cli end
 }
