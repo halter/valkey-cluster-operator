@@ -128,9 +128,22 @@ the PodDisruptionBudget, so a node drain cannot evict the last synced copy of
 a shard. Liveness remains a TCP check so a long sync is never killed.
 
 Both settings change the pod template. Upgrading the operator rolls every
-cluster through the operator's health-gated rollout (one pod per shard at a
+cluster through the operator's health-gated rollout (one pod per cluster at a
 time), and the existing `IgnoredDuringExecution` pods only spread out as that
 rollout restarts them.
+
+The rollout gate only trusts a complete picture: the pod count must match
+`shards * (replicas + 1)` and every shard StatefulSet must report all of its
+pods created and Ready. Without that, the second between a deleted pod's
+object disappearing and the StatefulSet recreating it looked healthy, and a
+second pod of the same shard could be deleted right behind the first.
+
+Two pods of a shard that restart together each only know the other's previous
+IP. They recover by re-meeting through the headless Service hostnames, so that
+Service publishes not-Ready addresses: a replica is not Ready until its link is
+up, and it cannot bring the link up until it has been met at its new address.
+As a backstop, the operator asks a Ready node to `CLUSTER MEET` any pod that
+has been Running but not Ready for more than 90 seconds.
 
 ## Prerequisites
 

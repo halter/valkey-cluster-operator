@@ -871,6 +871,26 @@ func (r *ValkeyClusterReconciler) isValkeyClusterHealthy(ctx context.Context, va
 		return false, nil
 	}
 
+	// The pod list is only trustworthy when it is complete. Between a deleted
+	// pod's object disappearing and the StatefulSet recreating it, the list is
+	// one pod short and every remaining pod can be Ready, so the gate passed
+	// and a second pod of the same shard was deleted one second after the
+	// first (staging, 2026-10-27: four shards, one of them left without a
+	// working replica). Require the spec's pod count and let each StatefulSet
+	// confirm all of its pods exist and are Ready.
+	if expected := expectedPodCount(valkeyCluster); len(podList.Items) != expected {
+		logger.Info("Cluster unhealthy: pod count differs from spec", "pods", len(podList.Items), "expected", expected)
+		return false, nil
+	}
+	stsList := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, stsList, listOpts...); err != nil {
+		return false, err
+	}
+	if reason, ok := statefulSetsSettled(stsList.Items, valkeyCluster); !ok {
+		logger.Info("Cluster unhealthy: " + reason)
+		return false, nil
+	}
+
 	// Every pod must be Running and Ready. Any terminating pod means a previous
 	// deletion hasn't fully settled yet — wait for it to complete before
 	// scheduling another deletion.
@@ -991,6 +1011,86 @@ func (r *ValkeyClusterReconciler) isValkeyClusterHealthy(ctx context.Context, va
 	return true, nil
 }
 
+// expectedPodCount is the number of Valkey pods the spec calls for.
+func expectedPodCount(valkeyCluster *cachev1alpha1.ValkeyCluster) int {
+	return int(valkeyCluster.Spec.Shards) * int(statefulSetSize(valkeyCluster))
+}
+
+// statefulSetsSettled reports whether there is one StatefulSet per shard and
+// each has created every pod it wants and reports them all Ready. A pod that
+// is mid-recreation is counted by neither status field, which is what makes
+// this safe where a bare pod list is not.
+func statefulSetsSettled(items []appsv1.StatefulSet, valkeyCluster *cachev1alpha1.ValkeyCluster) (string, bool) {
+	if len(items) != int(valkeyCluster.Spec.Shards) {
+		return fmt.Sprintf("%d StatefulSets, spec wants %d", len(items), valkeyCluster.Spec.Shards), false
+	}
+	for _, sts := range items {
+		want := int32(0)
+		if sts.Spec.Replicas != nil {
+			want = *sts.Spec.Replicas
+		}
+		if sts.Status.ObservedGeneration < sts.Generation {
+			return fmt.Sprintf("StatefulSet %s status not yet observed for generation %d", sts.Name, sts.Generation), false
+		}
+		if sts.Status.Replicas != want || sts.Status.ReadyReplicas != want {
+			return fmt.Sprintf("StatefulSet %s has %d pods, %d Ready, wants %d", sts.Name, sts.Status.Replicas, sts.Status.ReadyReplicas, want), false
+		}
+	}
+	return "", true
+}
+
+// notReadyRemeetAfter is how long a Running pod may stay not Ready before the
+// operator asks a Ready node to CLUSTER MEET it. Long enough for the pod's own
+// post-start meet and a normal sync to finish first.
+const notReadyRemeetAfter = 90 * time.Second
+
+// remeetNotReadyPod asks a Ready node of the cluster to CLUSTER MEET a pod
+// that has been Running but not Ready for a while. A replica is only Ready
+// once its replication link is up, and it cannot bring the link up while it
+// only knows its primary's previous IP, which happens when both pods of a
+// shard restart together. The headless Service publishes not-Ready addresses
+// so the pods' own hostname meet usually recovers this; this is the backstop
+// when that window was missed. MEET to an already known node is harmless: the
+// handshake resolves to the known node ID and only updates its address.
+func (r *ValkeyClusterReconciler) remeetNotReadyPod(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, pods []corev1.Pod, target corev1.Pod) {
+	logger := log.FromContext(ctx)
+	if target.Status.PodIP == "" || target.Status.StartTime == nil || time.Since(target.Status.StartTime.Time) < notReadyRemeetAfter {
+		return
+	}
+	for _, from := range pods {
+		if from.Name == target.Name || from.DeletionTimestamp != nil || from.Status.PodIP == "" {
+			continue
+		}
+		ready := false
+		for _, c := range from.Status.Conditions {
+			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+				ready = true
+			}
+		}
+		if !ready {
+			continue
+		}
+		client, err := r.NewValkeyClient(ctx, valkeyCluster, from.Status.PodIP, VALKEY_PORT)
+		if err != nil {
+			logger.Info("Could not create valkey client for re-meet", "from", from.Name, "error", err.Error())
+			return
+		}
+		defer client.Close()
+		if err := client.Do(ctx, client.B().ClusterMeet().Ip(target.Status.PodIP).Port(int64(VALKEY_PORT)).Build()).Error(); err != nil {
+			logger.Info("CLUSTER MEET of not-Ready pod failed", "from", from.Name, "target", target.Name, "error", err.Error())
+			return
+		}
+		logger.Info("Asked a Ready node to CLUSTER MEET a pod that has stayed not Ready",
+			"from", from.Name, "target", target.Name, "targetIP", target.Status.PodIP,
+			"notReadyFor", time.Since(target.Status.StartTime.Time).Round(time.Second).String())
+		// No elapsed time in the event message, so repeats aggregate into one
+		// event with a count instead of a new event every reconcile.
+		r.Recorder.Event(valkeyCluster, "Normal", "ReMeet",
+			fmt.Sprintf("Pod %s stayed Running but not Ready past %s; asked %s to CLUSTER MEET it at %s", target.Name, notReadyRemeetAfter, from.Name, target.Status.PodIP))
+		return
+	}
+}
+
 func (r *ValkeyClusterReconciler) waitForPodsToBeAccessibleViaValkey(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster) (*ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	podList := &corev1.PodList{}
@@ -1039,6 +1139,7 @@ func (r *ValkeyClusterReconciler) waitForPodsToBeAccessibleViaValkey(ctx context
 			}
 		} else {
 			logger.Info("Pod not ready", "Pod.Name", pod.Name)
+			r.remeetNotReadyPod(ctx, valkeyCluster, podList.Items, pod)
 			return &ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 	}
