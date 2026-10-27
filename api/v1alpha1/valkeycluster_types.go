@@ -26,6 +26,7 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster
+// +kubebuilder:validation:XValidation:rule="!has(self.autoscaling) || !has(self.autoscaling.maxResources) || self.autoscaling.maxResources.all(k, has(self.resources) && ((has(self.resources.limits) && k in self.resources.limits) || (has(self.resources.requests) && k in self.resources.requests)))",message="each auto-scaled resource needs a request or limit in spec.resources"
 type ValkeyClusterSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -51,6 +52,11 @@ type ValkeyClusterSpec struct {
 	// Resources requirements and limits for the containers
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Autoscaling grows and shrinks the CPU and memory of the valkey container
+	// with usage. spec.resources is the initial and minimum size.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	Autoscaling *ValkeyClusterAutoscaling `json:"autoscaling,omitempty"`
 
 	// Valkey pod storage. Optional: when omitted the operator provisions volumes
 	// with the cluster default storage class and manages the size automatically,
@@ -103,6 +109,17 @@ type ValkeyClusterSpec struct {
 	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
 }
 
+// ValkeyClusterAutoscaling configures CPU and memory auto-scaling.
+type ValkeyClusterAutoscaling struct {
+	// MaxResources turns on auto-scaling for each resource it names and caps
+	// its size. The size of a resource is its limit in spec.resources, or its
+	// request when spec.resources sets no limit for it. Requests and limits
+	// scale together, keeping the ratio set in spec.resources.
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k == 'cpu' || k == 'memory')",message="only cpu and memory can be auto-scaled"
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	MaxResources corev1.ResourceList `json:"maxResources,omitempty"`
+}
+
 // ValkeyConfigParameter is a single valkey config directive with its value.
 type ValkeyConfigParameter struct {
 	// Name is the valkey config directive name (e.g. "maxmemory").
@@ -142,6 +159,16 @@ type ValkeyClusterStatus struct {
 	// requested in spec.storage.
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	StorageSize *resource.Quantity `json:"storageSize,omitempty"`
+
+	// AutoscaledResources is the current size of each auto-scaled resource,
+	// between its size in spec.resources and spec.autoscaling.maxResources.
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	AutoscaledResources corev1.ResourceList `json:"autoscaledResources,omitempty"`
+
+	// LastResourceScaleTime is when usage or an OOM kill last changed an
+	// auto-scaled resource. Scaling down waits 30 minutes after it.
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	LastResourceScaleTime *metav1.Time `json:"lastResourceScaleTime,omitempty"`
 }
 
 type ValkeyClusterNode struct {

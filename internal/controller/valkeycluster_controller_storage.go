@@ -186,7 +186,7 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 		return nil, err
 	}
 	if !allowsExpansion {
-		return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
+		return nil, r.setConditionWithEvent(ctx, req, valkeyCluster, metav1.Condition{
 			Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionTrue, Reason: "StorageClassNotExpandable",
 			Message: fmt.Sprintf("StorageClass %q does not allow volume expansion, disk auto-scaling is disabled", scName),
 		})
@@ -221,7 +221,7 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 		// Clear a previously reported limit once usage recedes below the
 		// threshold (e.g. data was deleted or the limit-gated backlog cleared).
 		if cond := meta.FindStatusCondition(valkeyCluster.Status.Conditions, typeStorageLimitedValkeyCluster); cond != nil && cond.Status == metav1.ConditionTrue {
-			return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
+			return nil, r.setConditionWithEvent(ctx, req, valkeyCluster, metav1.Condition{
 				Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionFalse, Reason: "BelowThreshold",
 				Message: fmt.Sprintf("Disk usage is below the %d%% expansion threshold", diskUsageThresholdPercent),
 			})
@@ -237,7 +237,7 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 		// The message deliberately excludes the usage percentage so the
 		// condition (and its warning event) only refreshes when the limit or
 		// volume size changes, not every time usage drifts.
-		return nil, r.setStorageLimitedCondition(ctx, req, valkeyCluster, metav1.Condition{
+		return nil, r.setConditionWithEvent(ctx, req, valkeyCluster, metav1.Condition{
 			Type: typeStorageLimitedValkeyCluster, Status: metav1.ConditionTrue, Reason: "StorageLimitReached",
 			Message: fmt.Sprintf("Disk usage exceeds %d%% but volume size %s already reached spec.storageLimit %s",
 				diskUsageThresholdPercent, desired.String(), valkeyCluster.Spec.StorageLimit.String()),
@@ -266,9 +266,9 @@ func (r *ValkeyClusterReconciler) reconcileDiskAutoScaling(ctx context.Context, 
 	return &ctrl.Result{Requeue: true}, nil
 }
 
-// setStorageLimitedCondition records whether auto-scaling can proceed, emitting
-// an event only on transition to avoid spamming every poll.
-func (r *ValkeyClusterReconciler) setStorageLimitedCondition(ctx context.Context, req ctrl.Request, valkeyCluster *cachev1alpha1.ValkeyCluster, condition metav1.Condition) error {
+// setConditionWithEvent records an auto-scaling status condition, emitting an
+// event only when it changes so polling does not spam events.
+func (r *ValkeyClusterReconciler) setConditionWithEvent(ctx context.Context, req ctrl.Request, valkeyCluster *cachev1alpha1.ValkeyCluster, condition metav1.Condition) error {
 	if err := r.Get(ctx, req.NamespacedName, valkeyCluster); err != nil {
 		return err
 	}
