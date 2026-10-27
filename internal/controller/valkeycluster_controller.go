@@ -871,13 +871,7 @@ func (r *ValkeyClusterReconciler) isValkeyClusterHealthy(ctx context.Context, va
 		return false, nil
 	}
 
-	// The pod list is only trustworthy when it is complete. Between a deleted
-	// pod's object disappearing and the StatefulSet recreating it, the list is
-	// one pod short and every remaining pod can be Ready, so the gate passed
-	// and a second pod of the same shard was deleted one second after the
-	// first (staging, 2026-10-27: four shards, one of them left without a
-	// working replica). Require the spec's pod count and let each StatefulSet
-	// confirm all of its pods exist and are Ready.
+	// Require the full pod set: between a pod's deletion and its recreation the list is one short and the rest can all be Ready.
 	if expected := expectedPodCount(valkeyCluster); len(podList.Items) != expected {
 		logger.Info("Cluster unhealthy: pod count differs from spec", "pods", len(podList.Items), "expected", expected)
 		return false, nil
@@ -1016,10 +1010,7 @@ func expectedPodCount(valkeyCluster *cachev1alpha1.ValkeyCluster) int {
 	return int(valkeyCluster.Spec.Shards) * int(statefulSetSize(valkeyCluster))
 }
 
-// statefulSetsSettled reports whether there is one StatefulSet per shard and
-// each has created every pod it wants and reports them all Ready. A pod that
-// is mid-recreation is counted by neither status field, which is what makes
-// this safe where a bare pod list is not.
+// statefulSetsSettled reports whether there is one StatefulSet per shard, each with all its pods created and Ready.
 func statefulSetsSettled(items []appsv1.StatefulSet, valkeyCluster *cachev1alpha1.ValkeyCluster) (string, bool) {
 	if len(items) != int(valkeyCluster.Spec.Shards) {
 		return fmt.Sprintf("%d StatefulSets, spec wants %d", len(items), valkeyCluster.Spec.Shards), false
@@ -1039,19 +1030,10 @@ func statefulSetsSettled(items []appsv1.StatefulSet, valkeyCluster *cachev1alpha
 	return "", true
 }
 
-// notReadyRemeetAfter is how long a Running pod may stay not Ready before the
-// operator asks a Ready node to CLUSTER MEET it. Long enough for the pod's own
-// post-start meet and a normal sync to finish first.
+// notReadyRemeetAfter is how long a pod may stay Running but not Ready before the operator re-meets it.
 const notReadyRemeetAfter = 90 * time.Second
 
-// remeetNotReadyPod asks a Ready node of the cluster to CLUSTER MEET a pod
-// that has been Running but not Ready for a while. A replica is only Ready
-// once its replication link is up, and it cannot bring the link up while it
-// only knows its primary's previous IP, which happens when both pods of a
-// shard restart together. The headless Service publishes not-Ready addresses
-// so the pods' own hostname meet usually recovers this; this is the backstop
-// when that window was missed. MEET to an already known node is harmless: the
-// handshake resolves to the known node ID and only updates its address.
+// remeetNotReadyPod asks a Ready node to CLUSTER MEET a pod stuck not Ready, so a replica that only knows its primary's old IP can rejoin.
 func (r *ValkeyClusterReconciler) remeetNotReadyPod(ctx context.Context, valkeyCluster *cachev1alpha1.ValkeyCluster, pods []corev1.Pod, target corev1.Pod) {
 	logger := log.FromContext(ctx)
 	if target.Status.PodIP == "" || target.Status.StartTime == nil || time.Since(target.Status.StartTime.Time) < notReadyRemeetAfter {
@@ -1083,8 +1065,7 @@ func (r *ValkeyClusterReconciler) remeetNotReadyPod(ctx context.Context, valkeyC
 		logger.Info("Asked a Ready node to CLUSTER MEET a pod that has stayed not Ready",
 			"from", from.Name, "target", target.Name, "targetIP", target.Status.PodIP,
 			"notReadyFor", time.Since(target.Status.StartTime.Time).Round(time.Second).String())
-		// No elapsed time in the event message, so repeats aggregate into one
-		// event with a count instead of a new event every reconcile.
+		// Stable message so repeated events aggregate.
 		r.Recorder.Event(valkeyCluster, "Normal", "ReMeet",
 			fmt.Sprintf("Pod %s stayed Running but not Ready past %s; asked %s to CLUSTER MEET it at %s", target.Name, notReadyRemeetAfter, from.Name, target.Status.PodIP))
 		return

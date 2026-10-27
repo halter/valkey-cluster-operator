@@ -29,12 +29,7 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 		Spec: corev1.ServiceSpec{
 			Selector:  ls,
 			ClusterIP: "None",
-			// The pods re-meet each other by these hostnames after a restart
-			// (post_start.sh). A replica is not Ready until its replication
-			// link is up, and it cannot bring the link up until it has been
-			// met at its new IP, so its hostname must resolve while it is not
-			// Ready or the two never find each other. Clients reach the
-			// cluster through the module's own DNS record, not this Service.
+			// Pods re-meet by these hostnames after a restart, so a not-Ready replica must still resolve.
 			PublishNotReadyAddresses: true,
 			Ports: []corev1.ServicePort{
 				{
