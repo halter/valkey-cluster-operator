@@ -29,6 +29,8 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 		Spec: corev1.ServiceSpec{
 			Selector:  ls,
 			ClusterIP: "None",
+			// Pods re-meet by these hostnames after a restart, so a not-Ready replica must still resolve.
+			PublishNotReadyAddresses: true,
 			Ports: []corev1.ServicePort{
 				{
 					Port:       6379,
@@ -48,6 +50,9 @@ func (r *ValkeyClusterReconciler) upsertHeadlessService(ctx context.Context, val
 			}
 			needsUpdate := false
 
+			if found.Spec.PublishNotReadyAddresses != svc.Spec.PublishNotReadyAddresses {
+				needsUpdate = true
+			}
 			if len(found.Spec.Ports) != len(svc.Spec.Ports) {
 				needsUpdate = true
 			} else {
