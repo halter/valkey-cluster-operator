@@ -434,6 +434,10 @@ func (r *ValkeyClusterReconciler) reconcileStatefulSets(ctx context.Context, req
 			return &ctrl.Result{Requeue: true}, nil
 		}
 
+		if *found.Spec.Replicas > statefulSetSize(valkeyCluster) {
+			return r.shrinkShard(ctx, valkeyCluster, found)
+		}
+
 		foundResources := found.Spec.Template.Spec.Containers[0].Resources
 		log.Info(fmt.Sprintf("StatefulSet resources: %v", foundResources))
 
