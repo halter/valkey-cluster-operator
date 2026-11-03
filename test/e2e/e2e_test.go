@@ -558,6 +558,36 @@ var _ = Describe("controller", Ordered, func() {
 			// including replica catch-up, so allow well beyond the rollout time.
 			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 2, "supersecret"), 10*time.Minute, 15*time.Second).Should(Succeed())
 		})
+		It("should remove replicas", func() {
+			cmd := exec.Command("kubectl",
+				"-n", namespace,
+				"patch", "valkeycluster", "valkeycluster-sample",
+				"--type=json",
+				`-p=[{"op":"replace","path":"/spec/replicas","value":1}]`,
+			)
+			_, err := utils.Run(cmd)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			EventuallyWithOffset(1, verifyClusterState("valkeycluster-sample", 2, 1, "supersecret"), 5*time.Minute, 15*time.Second).Should(Succeed())
+
+			getPvc := func() error {
+				cmd := exec.Command("kubectl", "get", "pvc",
+					"-l", fmt.Sprintf("cache/name=%s,app.kubernetes.io/name=valkeyCluster-operator,app.kubernetes.io/managed-by=ValkeyClusterController", "valkeycluster-sample"),
+					"-o", "go-template={{ range .items }}"+
+						"{{ if not .metadata.deletionTimestamp }}"+
+						"{{ .metadata.name }}"+
+						"{{ \"\\n\" }}{{ end }}{{ end }}",
+					"-n", namespace,
+				)
+				pvcOutput, err := utils.Run(cmd)
+				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				pvcNames := utils.GetNonEmptyLines(string(pvcOutput))
+				if len(pvcNames) != 4 {
+					return fmt.Errorf("expect 4 PVCs, but got %d", len(pvcNames))
+				}
+				return nil
+			}
+			Eventually(getPvc, 2*time.Minute, time.Second).Should(Succeed())
+		})
 		It("be deleted", func() {
 			cmd := exec.Command("kubectl",
 				"-n", namespace,
