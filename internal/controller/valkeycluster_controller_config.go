@@ -61,11 +61,15 @@ func managedDefaultParametersForMemory(valkeyCluster *cachev1alpha1.ValkeyCluste
 
 // imageSupportsManagedDefaults reports whether the image tag positively
 // parses as Valkey >= 8.0. Tags like "ghcr.io/halter/valkey-server:8.0.5",
-// "ghcr.io/halter/valkey:8.0.2" and "...:8.1.9" qualify. Anything that does
-// not parse (no tag, digest pins, non-numeric tags) is treated as
-// unsupported so no directive lands in a config file that an unknown server
-// version might refuse to boot with.
+// "ghcr.io/halter/valkey:8.0.2" and "...:8.1.9" qualify, and so does a tag
+// pinned to a digest ("...:9.1.3@sha256:..."), whose tag still names the
+// version. Anything that does not parse (no tag, a bare digest pin, non-numeric
+// tags) is treated as unsupported so no directive lands in a config file that
+// an unknown server version might refuse to boot with.
 func imageSupportsManagedDefaults(image string) bool {
+	if at := strings.Index(image, "@"); at >= 0 {
+		image = image[:at]
+	}
 	idx := strings.LastIndex(image, ":")
 	if idx < 0 || strings.Contains(image[idx:], "/") {
 		return false
