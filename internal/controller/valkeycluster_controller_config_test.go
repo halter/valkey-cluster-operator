@@ -98,7 +98,7 @@ var _ = Describe("parseValkeyMemory", func() {
 })
 
 var _ = Describe("imageSupportsManagedDefaults", func() {
-	It("accepts the fleet's valkey >= 8.0 images", func() {
+	It("accepts the fleet's valkey >= 8.0 images, digest-pinned ones by their tag", func() {
 		for _, img := range []string{
 			"ghcr.io/halter/valkey-server:8.0.5",
 			"ghcr.io/halter/valkey-server:8.1.9",
@@ -106,16 +106,20 @@ var _ = Describe("imageSupportsManagedDefaults", func() {
 			"ghcr.io/halter/valkey:8.0.2",
 			"localhost:5000/valkey:8.0.5",
 			"valkey/valkey:v8.0.5",
+			"ghcr.io/halter/valkey-server:9.1.3@sha256:44a8b80fd09c57b082b0680adf5d7449cebd9c019af6d904bded257527a26e78",
+			"localhost:5000/valkey:8.0.5@sha256:deadbeef",
 		} {
 			Expect(imageSupportsManagedDefaults(img)).To(BeTrue(), "image %q", img)
 		}
 	})
 
-	It("rejects pre-8.0, untagged, digest-pinned, and unparseable images", func() {
+	It("rejects pre-8.0, untagged, bare digest-pinned, and unparseable images", func() {
 		for _, img := range []string{
 			"ghcr.io/halter/valkey-server:7.2.5",
 			"ghcr.io/halter/valkey-server",
 			"ghcr.io/halter/valkey-server@sha256:deadbeef",
+			"ghcr.io/halter/valkey-server:7.2.5@sha256:deadbeef",
+			"localhost:5000/valkey-server@sha256:deadbeef",
 			"ghcr.io/halter/valkey-server:latest",
 			"localhost:5000/valkey-server",
 			"",
